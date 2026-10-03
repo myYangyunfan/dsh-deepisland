@@ -1,0 +1,44 @@
+// 测试入口: node test/run.mjs [parse|apply|perf|degradation|all]
+// 依赖: 无（纯 Node 内置模块 + 读取 lib/client.js 源码）
+// 退出码: 0 = 全部通过（有断言的套件统计 pass/fail；perf/degradation 为诊断脚本，仅打印数据）
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const which = process.argv[2] || 'all';
+
+const SUITES = {
+  parse: 'test-parse.mjs',
+  apply: 'test-apply.mjs',
+  subagent: 'test-subagent.mjs',
+  perf: 'perf.mjs',
+  degradation: 'degradation.mjs',
+};
+
+const list = which === 'all' ? Object.keys(SUITES) : [which];
+
+// harness 先跑：执行 client.js 并把 factory 产物挂到 globalThis.__mod
+// test-apply 自带独立 harness（不依赖 __mod），其余套件都需要
+if (list.some(k => k !== 'apply')) {
+  await import(path.join(__dirname, 'harness.mjs'));
+}
+
+for (const key of list) {
+  const file = SUITES[key];
+  if (!file) { console.error('未知测试: ' + key + '  可用: ' + Object.keys(SUITES).join(', ') + ', all'); process.exit(1); }
+  console.log('\n' + '#'.repeat(50));
+  console.log('# 套件: ' + key + '  (' + file + ')');
+  console.log('#'.repeat(50));
+  await import(path.join(__dirname, file));
+}
+
+const r = globalThis.__results || {};
+const keys = Object.keys(r);
+if (keys.length) {
+  const tp = keys.reduce((s, k) => s + r[k].pass, 0);
+  const tf = keys.reduce((s, k) => s + r[k].fail, 0);
+  console.log('\n' + '='.repeat(46));
+  console.log('总计: 通过 ' + tp + ' / 失败 ' + tf);
+  console.log('='.repeat(46));
+  process.exit(tf > 0 ? 1 : 0);
+}

@@ -1,0 +1,10 @@
+node_modules/
+.DS_Store
+*.log
+dist/
+.idea/
+.vscode/
+test/.tmp/
+
+# 本地 AI 工作记忆（不公开）
+.workbuddy/

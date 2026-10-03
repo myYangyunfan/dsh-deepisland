@@ -1,0 +1,7 @@
+# dsh-vibe-island bundle patch
+# 服务端插件注册：纳入 DSH Cordis 插件栈
+# 客户端 bundle 由 package.json 的 dsh.client.inject / ModuleLoader 自动加载
+- insert:
+    - id: vibe-island
+      name: '@dsh-external/dsh-vibe-island'
+      config: {}
