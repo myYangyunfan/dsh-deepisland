@@ -22,6 +22,33 @@ console.log('  声明: [' + inject.join(', ') + ']');
 check('不再注入 settingsScope', !inject.includes('settingsScope'), inject.join(','));
 check('不再注入不存在的服务', inject.every(s => s !== 'settingsScope'));
 
+// 关键回归：可被用户禁用的服务绝不能进 inject。
+// configForms 由 @deepseek-ai/dsh-client-ui-settings 提供，用户可在 profile 的
+// cordis.patch.yml 里 `enabled: false` 关掉它（本机 desktop profile 就是如此）。
+// 一旦注入，缺失时 Cordis 会无限等待 → 插件永久 pending。
+console.log('\n=== H1b: 可禁用服务不得进 inject ===');
+const PATCH_FILE = '/Users/delinger/.dsh/profiles/desktop/cordis.patch.yml';
+if (fs.existsSync(PATCH_FILE)) {
+  const patch = fs.readFileSync(PATCH_FILE, 'utf8');
+  const disabled = [];
+  patch.split('\n').forEach((line, i) => {
+    if (/enabled:\s*false/.test(line)) {
+      for (let j = i; j >= 0; j--) {
+        if (/- id:/.test(patch.split('\n')[j])) { disabled.push(patch.split('\n')[j].trim()); break; }
+      }
+    }
+  });
+  console.log('  本机 desktop profile 被禁用的条目: ' + (disabled.length ? disabled.join(', ') : '(无)'));
+  const settingsOff = /ui-settings[\s\S]{0,80}enabled:\s*false/.test(patch);
+  if (settingsOff) console.log('  ⚠️  检测到 dsh-client-ui-settings 被禁用 → configForms 不可用');
+  check('configForms 未被注入（因其可被禁用）', !inject.includes('configForms'),
+    'configForms 会因 ui-settings 被禁用而导致 pending');
+  check('configForms 改为运行时探测', /ctx\.configForms\s*&&\s*typeof ctx\.configForms\.get/.test(src));
+  check('无配置服务时仍渲染（不返回 null）', !/if \(!scope\)\s*return null/.test(src));
+} else {
+  check('configForms 未被注入', !inject.includes('configForms'));
+}
+
 console.log('\n=== H2: 宿主 bundle 中是否存在这些服务 ===');
 let asar = '';
 if (fs.existsSync(ASAR)) {
