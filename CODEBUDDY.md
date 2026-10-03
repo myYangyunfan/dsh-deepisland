@@ -16,7 +16,8 @@ This repository does not use a build step or bundling pipeline; code is written 
   ```
 - **Run the test suite** (pure Node, no dependencies — it reads `lib/client.js` as text and executes the ModuleLoader factory against a stubbed DOM):
   ```bash
-  node test/run.mjs all              # all Node suites (112 assertions)
+  node test/run.mjs all              # all Node suites
+  node test/run.mjs contract         # host contract: inject services exist in the real app.asar
   node test/run.mjs parse            # parseActivityFromEvents state machine + cursor isolation
   node test/run.mjs apply            # apply() mount, slot registration, error tolerance
   node test/run.mjs subagent         # countActiveSubagents + dead-config regression
@@ -97,6 +98,33 @@ deepisland/
   - All CSS lives in a single `CSS_STYLES` template string in `client.js`, injected once via `ensureCss()` keyed on `#dsh-vibe-island-styles`. Every class is namespaced `vibe-island-*` / `vibe-*`.
 
 ## Design Notes
+
+### `exports.inject` may only name services the host actually provides
+
+This is the single most dangerous thing to get wrong. Declaring a service that the host does not supply leaves the plugin **permanently pending** — it never activates, and DSH reports it only as a boot warning:
+
+```
+web boot: 1 entry did not activate
+@dsh-external/dsh-vibe-island: pending (waiting for service: settingsScope)
+```
+
+Client-side services live in the host's `app.asar`; enumerate the real ones by extracting every `const inject = [...]` from it rather than guessing. Verified against `@deepseek-ai/dsh-desktop` 0.2.0-rc.2:
+
+| Purpose | Real service | Notes |
+|---|---|---|
+| Slot registration | `slots` | `ctx.slots.inject(name, fn, label)` / `ctx.slots.register(meta, comp)` |
+| Session state | `sessions` | `ctx.sessions.list.getSnapshot()`, `ctx.sessions.binding(id)` |
+| Settings/config | `configForms` | `ctx.configForms.get(ns, bootstrap?)`; also `describe` / `developerTools` / `whileServed` |
+
+**`settingsScope` does not exist.** It appears 0 times in the host bundle. `configForms.describe()` returns the read/fold face (`getSnapshot` / `subscribe` / `ensure` / `acceptView`); `ctx.settingsSchema` rehydrates schemas and validates drafts. `settings` is the *server*-side service and is unrelated to the client config surface.
+
+`bindConfigScope()` resolves the config source in the order `configForms` → legacy `settingsScope.bind({ namespace })` → `null`, and `normalizeScope()` folds every shape into `{ getSnapshot, subscribe, update }`. When no config service resolves, the island still renders with defaults and logs a warning — it does not throw. But do **not** put the fallback service name in `exports.inject`; that reintroduces the pending hang.
+
+`test/test-contract.mjs` reads the real `app.asar` and asserts every name in `exports.inject` is a service the host actually declares — run it after any change to `inject`.
+
+### Server-side `settings.register(ns, schema, { base })`
+
+`@deepseek-ai/dsh-settings` (a profile dependency, not part of `app.asar`) provides it. The namespace must be a lowercase hyphenated identifier, **duplicate registration throws**, and an invalid stored section fails the registration itself. `apply()` in `lib/index.js` therefore wraps the call in try/catch and warns rather than blocking host startup.
 
 ### Cursor cache is keyed by session id, never by array reference
 

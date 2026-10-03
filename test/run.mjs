@@ -8,6 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const which = process.argv[2] || 'all';
 
 const SUITES = {
+  contract: 'test-contract.mjs',
   parse: 'test-parse.mjs',
   apply: 'test-apply.mjs',
   subagent: 'test-subagent.mjs',

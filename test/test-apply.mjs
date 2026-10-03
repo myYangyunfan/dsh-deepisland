@@ -50,7 +50,7 @@ const requireStub = (n) => {
 
 const mod = captured.factory(requireStub);
 
-console.log('\n=== A1: apply() 基础挂载（settingsScope 可用）===');
+console.log('\n=== A1: apply() 基础挂载（configForms 可用）===');
 hookCalls.length = 0; renderCalled = 0; domLog.length = 0;
 
 let scopeCfg = { enabled: true, placement: 'notch', platformMode: 'auto', glowEffect: true, expandOnHover: true, showSubagentCount: true, scale: 1.0 };
@@ -63,7 +63,7 @@ const scope = {
 
 const registered = [];
 const ctx = {
-  settingsScope: { bind: (ns) => { check('bind 传入正确命名空间 dsh-vibe-island', ns === 'dsh-vibe-island', ns); return scope; } },
+  configForms: { get: (ns) => { check('configForms.get 传入正确命名空间 dsh-vibe-island', ns === 'dsh-vibe-island', ns); return { get value() { return scopeCfg; }, set: (p) => { updates.push(p); scopeCfg = { ...scopeCfg, ...p }; }, watch: () => () => {} }; } },
   sessions: { list: { getSnapshot: () => ({ activeId: 'sess-1' }) } },
   slots: {
     inject: (slot, fn, label) => { try { fn(); } catch (e) { check('slot inject 失败: ' + slot, false, e.message); } },
@@ -89,11 +89,11 @@ try { mod.apply(ctx); check('二次 apply 未抛异常', true); } catch (e) { ch
 const after = domLog.filter(l => l.includes('dsh-vibe-island-root')).length;
 check('容器已存在时不重复创建', after === before, 'before=' + before + ' after=' + after);
 
-console.log('\n=== A3: settingsScope 缺失时的降级 ===');
+console.log('\n=== A3: 配置服务缺失时的降级 ===');
 hookCalls.length = 0; renderCalled = 0;
 const ctx2 = { sessions: { list: { getSnapshot: () => ({ activeId: 's' }) } }, slots: { inject: () => {}, register: () => {} } };
-try { mod.apply(ctx2); check('无 settingsScope 时不崩溃', true); }
-catch (e) { check('无 settingsScope 时不崩溃', false, e.message); }
+try { mod.apply(ctx2); check('无配置服务时不崩溃', true); }
+catch (e) { check('无配置服务时不崩溃', false, e.message); }
 check('仍尝试渲染（用默认配置）', renderCalled > 0, 'renderCalled=' + renderCalled);
 
 console.log('\n=== A4: ctx 几乎全空 ===');
@@ -104,7 +104,7 @@ catch (e) { check('ctx=undefined 抛错(宿主契约保证不发生)', true, '�
 
 console.log('\n=== A5: slots.register 抛错时容错 ===');
 const ctx3 = {
-  settingsScope: { bind: () => scope },
+  configForms: { get: () => scope },
   slots: { inject: (s, fn) => { try { fn(); } catch (e) { throw new Error('slot 内部炸了'); } }, register: () => { throw new Error('register 失败'); } },
 };
 try { mod.apply(ctx3); check('register 抛错被捕获（不阻断宿主）', true); }
@@ -117,7 +117,7 @@ const mod2 = captured.factory((n) => {
   if (n === 'react-dom/client') return badDom;
   throw new Error('nf');
 });
-try { mod2.apply({ settingsScope: { bind: () => scope }, slots: { inject: () => {}, register: () => {} } }); check('createRoot 抛错被捕获', true); }
+try { mod2.apply({ configForms: { get: () => scope }, slots: { inject: () => {}, register: () => {} } }); check('createRoot 抛错被捕获', true); }
 catch (e) { check('createRoot 抛错被捕获', false, '泄漏: ' + e.message); }
 
 console.log('\n=== A7: header 按钮切换 enabled ===');
