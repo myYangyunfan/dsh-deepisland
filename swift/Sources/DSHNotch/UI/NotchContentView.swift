@@ -58,6 +58,12 @@ struct NotchContentView: View {
         .frame(width: metrics.windowSize.width,
                height: metrics.windowSize.height,
                alignment: .top)
+        // 点一下 = 钉住/取消钉住。
+        //
+        // 只能用「整块可点」而不是小按钮：面板平时是鼠标穿透的，只有指针在岛上时
+        // 才临时打开交互（见 NotchPanel.isInteractive），小按钮的命中区太小、
+        // 判定时机也难对齐。点击也不会漏给下层应用 —— 交互打开时窗口会吃掉这次点击。
+        .onTapGesture { state.pinned.toggle() }
     }
 
     // MARK: - 岛体（形状 + 光晕 + 内容）
@@ -157,10 +163,16 @@ struct NotchContentView: View {
 
                 Spacer()
 
-                Button { state.pinned = false } label: {
-                    Text("✕").font(.system(size: 11)).foregroundColor(Color(white: 0.5))
+                // 交互提示（点击整块岛体 = 钉住/取消钉住）
+                if state.pinned {
+                    Label("已钉住 · 点一下取消", systemImage: "pin.fill")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(glow.opacity(0.9))
+                } else {
+                    Text("移开鼠标收起 · 点一下钉住")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(Color(white: 0.34))
                 }
-                .buttonStyle(.plain)
             }
             .overlay(alignment: .bottom) {
                 Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5).offset(y: 4)

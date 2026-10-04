@@ -104,6 +104,28 @@ struct NotchMetrics {
     /// 文字区距形状顶端的缩进：刘海高度（物理挖孔内画什么都看不见）
     var contentTopInset: CGFloat { notchHeight }
 
+    // MARK: - 命中区（屏幕坐标，AppKit 左下原点）
+
+    /// 岛体矩形：顶端贴屏，水平居中。
+    ///
+    /// 悬停/点击判定都用它，而不是窗口矩形 —— 窗口按展开态取最大并含
+    /// `bleed` 留白（480×180），拿窗口当热区会把菜单栏一大片都算成"岛上"。
+    func islandRect(expanded: Bool) -> NSRect {
+        let size = expanded ? expandedSize : compactSize
+        return NSRect(x: screenFrame.midX - size.width / 2,
+                      y: screenFrame.maxY - size.height,
+                      width: size.width,
+                      height: size.height)
+    }
+
+    /// 悬停热区：折叠态岛体向外扩 8pt。
+    ///
+    /// 向外扩是因为**刘海正中那 156×28 是物理挖孔、屏幕上看不见任何东西**，
+    /// 用户"把鼠标放到刘海上"时其实是在盲区里，判定必须宽松一点才跟手。
+    var hoverHotRect: NSRect {
+        islandRect(expanded: false).insetBy(dx: -8, dy: -8)
+    }
+
     var describe: String {
         String(format: "屏幕 %.0f×%.0f@%.0fx | 刘海 %.0f×%.0f @(x=%.0f,y=%.0f) | 折叠 %.0f×%.0f | 展开 %.0f×%.0f",
                screenFrame.width, screenFrame.height,

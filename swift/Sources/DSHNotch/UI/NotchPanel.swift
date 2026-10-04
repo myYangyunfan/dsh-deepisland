@@ -14,10 +14,17 @@ import SwiftUI
 /// 窗口尺寸按**展开态**取最大（这样展开时不需要改窗口大小，动画不会被裁），
 /// 内容视图用 `bleed` 左右/底部留白包住，并**顶对齐**钉在窗口顶部。
 /// 于是形状的顶边精确落在屏幕顶边，两个方角隐没在屏幕边界上。
+///
+/// ## 交互：穿透为常态，悬停时临时接管
+///
+/// `ignoresMouseEvents = true` 的代价是窗口**收不到任何鼠标事件**，
+/// 所以悬停检测不能走 `mouseEntered`（永远不触发），只能由 App 层轮询
+/// `NSEvent.mouseLocation` 判定，再调 `isInteractive` 临时打开交互。
 final class NotchPanel: NSPanel {
     private let metrics: NotchMetrics
     /// 内容容器（窗口比内容大，用于容纳光晕外溢）
     private let container = NSView(frame: .zero)
+    private let verbose = ProcessInfo.processInfo.environment["DSH_NOTCH_VERBOSE"] != nil
 
     init(metrics: NotchMetrics) {
         self.metrics = metrics
@@ -46,6 +53,22 @@ final class NotchPanel: NSPanel {
 
     /// 屏幕是否有硬件刘海
     var screenHasNotch: Bool { metrics.hasNotch }
+
+    /// 是否接收鼠标事件（默认穿透）。
+    ///
+    /// 只有鼠标悬停到岛上时才临时打开，让 HUD 里的按钮可以点；
+    /// 一旦移开立刻恢复穿透 —— 否则窗口矩形（480×180，比岛体大一圈）
+    /// 会长期吞掉其下方应用的点击。
+    var isInteractive: Bool {
+        get { !ignoresMouseEvents }
+        set {
+            guard ignoresMouseEvents == newValue else { return }
+            ignoresMouseEvents = !newValue
+            if verbose {
+                NSLog("[dsh-notch] 鼠标交互: \(newValue ? "开（悬停中，可点击）" : "关（穿透）")")
+            }
+        }
+    }
 
     /// **必须覆盖**：默认实现会把窗口约束在 `screen.visibleFrame` 内
     /// （即排除菜单栏/刘海那 28pt 带状区域），于是 `setFrame` 之后
@@ -112,5 +135,17 @@ final class NotchPanel: NSPanel {
     /// 立即隐藏（无动画），供降级场景使用。
     func hideImmediately() {
         orderOut(nil)
+    }
+
+    /// 诊断：确认点击真的落到了本窗口上。
+    ///
+    /// 面板平时 `ignoresMouseEvents = true`（穿透），只有指针在岛上时
+    /// `isInteractive` 打开，此时点击才会到这里。事件先给 NSHostingView，
+    /// SwiftUI 没处理才会沿响应链冒到这里来。
+    override func mouseDown(with event: NSEvent) {
+        if verbose {
+            NSLog("[dsh-notch] 面板收到点击: \(event.locationInWindow)")
+        }
+        super.mouseDown(with: event)
     }
 }

@@ -11,6 +11,24 @@
 > 两套方案同时开会在 DSH 窗口内叠出「应用内岛 + 真实刘海岛」两个状态栏，
 > 建议只留系统级这一个（关闭插件的方法见仓库根 README）。
 
+## 怎么用
+
+装好并在运行后（菜单栏出现波形图标 ⏦），刘海正中就是这块浮层：
+
+| 操作 | 结果 |
+|---|---|
+| **鼠标移到刘海上**（停留约 0.2 秒） | 展开成大面板（440×160） |
+| **鼠标移开**（超过 0.35 秒） | 自动收起 |
+| **在岛上点一下** | 钉住（常驻展开）／再点一下取消 |
+| 状态变橙（等待人工确认） | 自动展开提醒，不用手点 |
+| 菜单栏波形图标 | 使用说明 / 钉住展开 / 悬停展开开关 / 空闲自动收起 / 开机自启 / 定位会话文件 / 导出形状预览图 / 退出 |
+
+状态色与 DSH 插件端一致：灰=待命、蓝=思考、青=执行工具、橙=等你确认。
+展开面板显示：状态角标、当前任务、工具参数摘要、耗时、工具调用次数。
+启动后会自动展开 2.4 秒作为「我在跑」的演示。
+
+数据全部**只读**本地会话文件，不联网、不改 DSH 任何文件。
+
 ## 形状：为什么是「刘海的矩形延伸」
 
 本机实测（MacBook Air 13" 1280×832 @2x）：
@@ -35,6 +53,25 @@ auxiliaryTopRightArea = (718, 804, 562, 28)
 尺寸策略（`NotchMetrics`，全部由实测刘海推导）：
 折叠 208×50（= 刘海宽 + 26×2），展开 440×160（= 刘海高 + 132）。
 文字一律从刘海高（28pt）之下开始——**刘海区域是物理挖孔，画在那里的像素永远看不见**。
+
+## 交互：悬停与点击怎么实现的
+
+面板为了不抢用户的点击，是 `ignoresMouseEvents = true` 的**穿透窗口**。
+代价是它**收不到任何鼠标事件**——所以：
+
+- **悬停不能靠 `mouseEntered`**（穿透状态下永远不触发），只能由 App 层
+  以 1/15 秒轮询 `NSEvent.mouseLocation` 自行判定指针是否落在岛体矩形内。
+  读鼠标位置**不需要任何权限**（连辅助功能授权都不需要）。
+- 判定用 `NotchMetrics.islandRect(expanded:)` 而不是窗口矩形 —— 窗口按展开态
+  取最大（480×180，含光晕留白），拿它当热区会把菜单栏一大片都算成「岛上」。
+- 进入热区后需**停留 0.18 秒**才展开，避免鼠标掠过往顶栏时误触发；
+  离开后**宽限 0.35 秒**才收起，避免边缘抖动导致闪烁。展开态整块也算「还在岛上」。
+- **点击只在指针真的位于岛上时才接管**（`NotchPanel.isInteractive`，
+  不留宽限、每次轮询重新判定）。否则窗口矩形会长期吞掉其下方应用与菜单栏的点击。
+  这也意味着：点一下岛体钉住、再点一下取消，都不会「漏」到底下的应用。
+- 因为交互是「悬停时临时打开」的，**小按钮是坏的**（早期版本 HUD 右上角有个 ✕，
+  在穿透状态下根本点不动，是个假控件）。现在改成整块岛体可点，语义写在面板上
+  （「点一下钉住」/「已钉住 · 点一下取消」）。
 
 ## 编译
 
@@ -88,6 +125,32 @@ swiftc -O -sdk "$(xcrun --show-sdk-path)" -target arm64-apple-macos13.0 -parse-a
 
 `DSH_NOTCH_VERBOSE=1` 启动时还会打印 `NSWindow.frame`（AppKit 左下原点）
 与自身窗口的 CG bounds，两边互相印证。
+
+### 3. 真正挪动指针，验证悬停链路
+
+```bash
+swiftc -O -sdk "$(xcrun --show-sdk-path)" -target arm64-apple-macos13.0 \
+  -o /tmp/probe-hover tools/probe-hover.swift Sources/DSHNotch/Core/NotchMetrics.swift
+
+DSH_NOTCH_VERBOSE=1 ./.build/DSHNotch &     # 前台可看日志
+/tmp/probe-hover --corner                   # 先把指针挪走（基线）
+/tmp/probe-hover --notch 900                # 挪到刘海 → 期望日志「悬停: 进入热区 → 展开」
+/tmp/probe-hover --corner 900               # 挪走     → 期望日志「悬停: 离开 → 收起」
+```
+
+已实测：基线 0 次展开；指针进入后 0.20s 出现「进入热区 → 展开」；
+移开后 0.40s 出现「离开 → 收起」；`鼠标交互` 随指针同步开/关。
+
+### 4. 注入真实 NSEvent，验证点击链路
+
+```bash
+./build.sh self-test        # 或 ./.build/DSHNotch --self-test，退出码 0 = 通过
+```
+
+自检把 `leftMouseDown/Up` 直接 `sendEvent` 进窗口，断言「点击 → 钉住翻转」。
+**为什么不用 `CGEvent.post(tap: .cghidEventTap)`**：它需要辅助功能授权
+（本机 `AXIsProcessTrusted = false`），事件会被系统**静默丢弃**——
+探针打印「已合成点击」但宿主端毫无反应，看起来像应用坏了，其实是权限问题。
 
 ## 数据来源
 
@@ -180,6 +243,16 @@ DSH_NOTCH_VERBOSE=1 /Applications/DSHNotch.app/Contents/MacOS/DSHNotch
 13. **App 启动即退** —— 用 SwiftUI `App` 协议的 `Settings {}` 场景没有主窗口，
     `NSApplication` 不会常驻。改用 `@main enum` + `NSApplication.run()`，
     策略设 `.accessory`。
+14. **穿透窗口收不到 `mouseEntered`** —— `ignoresMouseEvents = true` 时
+    `NSTrackingArea`、`mouseEntered(with:)` 全部失效（鼠标事件在窗口服务器层就被
+    丢掉了）。想同时做到「不抢点击」和「能感知悬停」，只有轮询
+    `NSEvent.mouseLocation` 一条路——它不需要任何权限。
+15. **穿透状态下的按钮是假控件** —— 同理，`ignoresMouseEvents = true` 时
+    SwiftUI `Button` 永远点不动。要么在悬停时把 `ignoresMouseEvents` 设回 false
+    （本项目做法，且只对「指针真在岛上」这一瞬间生效），要么别放按钮。
+16. **合成 `CGEvent` 会被静默丢弃** —— 无辅助功能授权时
+    `CGEvent.post(tap: .cghidEventTap)` 与 `postToPid` 都不生效，
+    且 CLI 层面看不到任何报错。验证点击请直接 `NSWindow.sendEvent(NSEvent.mouseEvent(...))`。
 
 ## 已知限制
 
@@ -189,3 +262,8 @@ DSH_NOTCH_VERBOSE=1 /Applications/DSHNotch.app/Contents/MacOS/DSHNotch
   但样式未针对无刘海屏调优）。
 - 折叠态胶囊比刘海宽 52pt，会盖住刘海两侧各 26pt 的菜单栏空白区；
   展开态 440pt 宽，会明显盖住菜单栏（可接受：这是用户主动触发的临时面板）。
+- 悬停热区必然与刘海两侧的菜单栏带重叠（胶囊本来就画在那里）。
+  鼠标停在紧邻刘海的那 26pt 空白带上也会展开 —— 这是刻意的（不然盲区里
+  根本没法对准），嫌烦可在菜单栏关掉「鼠标悬停展开」。
+- 悬停/点击都依赖本地轮询与窗口服务器，**多显示器时只服务带刘海的屏**
+  （`NotchMetrics.targetScreen()` 优先选有刘海的屏，否则主屏）。

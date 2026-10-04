@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// 应用入口。
@@ -26,6 +27,13 @@ enum DSHNotchMain {
             return
         }
 
+        // 自检模式：向窗口注入合成事件，验证点击 → 钉住这条链路
+        if CommandLine.arguments.contains("--self-test") {
+            _ = NSApplication.shared
+            let test = InteractionSelfTest()
+            exit(test.run() ? 0 : 1)
+        }
+
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -33,13 +41,15 @@ enum DSHNotchMain {
         app.setActivationPolicy(.accessory)
         app.run()
         // 保活 delegate
-        withExtendedLifetime(delegate) {}
+        withExtendedLifetime(delegate) { _ = delegate }
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: NotchPanel?
     private var timer: Timer?
+    /// 指针轮询（高频，只读鼠标位置，不碰文件）
+    private var pointerTimer: Timer?
     private let source = SessionSource()
     private var cursor = ActivityCursor()
     private let state = NotchViewState()
@@ -47,13 +57,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isVisible = false
     private var pinItem: NSMenuItem?
     private var idleItem: NSMenuItem?
+    private var hoverItem: NSMenuItem?
+    private var launchItem: NSMenuItem?
 
-    /// 轮询间隔（秒）。与插件端的 250ms 一致。
+    /// 数据轮询间隔（秒）。与插件端的 250ms 一致。
     private let pollInterval: TimeInterval = 0.25
+    /// 指针轮询间隔（秒）。悬停要跟手，得比数据快一档。
+    private let pointerInterval: TimeInterval = 1.0 / 15.0
     /// 空闲多久后收起刘海（秒）
     private let idleHideDelay: TimeInterval = 3.0
     private var lastActiveAt: Date?
     private var didLogFirstTick = false
+
+    // MARK: - 悬停状态
+
+    /// 指针是否停在岛上
+    private var hovering = false
+    /// 指针离开的时刻（用于延迟收起，避免边缘抖动导致反复闪）
+    private var hoverExitAt: Date?
+    /// 离开后多久收起（秒）
+    private let hoverGrace: TimeInterval = 0.35
+    /// 进入热区后需停留多久才展开（秒）——防止鼠标掠过顶部时误触发
+    private var hoverEnterAt: Date?
+    private let hoverDwell: TimeInterval = 0.18
+
+    /// 启动时演示一次展开，让用户立刻看到「它在工作」
+    private var showcaseActive = false
+
+    private let verbose = ProcessInfo.processInfo.environment["DSH_NOTCH_VERBOSE"] != nil
+    /// 订阅视图层的状态变化（例如点一下岛体钉住），好把它记进日志、立刻生效
+    private var cancellables = Set<AnyCancellable>()
 
     /// DSH 是否在运行 —— 常驻策略的唯一依据
     private var dshRunning = false
@@ -62,7 +95,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         get { UserDefaults.standard.bool(forKey: "hideWhenIdle") }
         set { UserDefaults.standard.set(newValue, forKey: "hideWhenIdle") }
     }
+    /// 鼠标悬停展开（默认开）
+    private var hoverExpand: Bool {
+        get { UserDefaults.standard.object(forKey: "hoverExpand") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "hoverExpand") }
+    }
     private static let dshBundleID = "com.deepseek.dsh"
+
+    // MARK: - 生命周期
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("[dsh-notch] 屏幕度量: \(metrics.describe)")
@@ -74,7 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.panel = panel
         NSLog("[dsh-notch] zstd 工具: \(SessionSource.zstdToolPath ?? "未找到（将无法读取会话）")")
         NSLog("[dsh-notch] 最新会话: \(source.latestSessionFile()?.lastPathComponent ?? "无")")
-        NSLog("[dsh-notch] DSH 运行中: \(dshRunning)")
+        NSLog("[dsh-notch] DSH 运行中: \(dshRunning) | 悬停热区: \(metrics.hoverHotRect)")
 
         let wc = NSWorkspace.shared.notificationCenter
         wc.addObserver(self, selector: #selector(dshAppChanged),
@@ -82,13 +122,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wc.addObserver(self, selector: #selector(dshAppChanged),
                        name: NSWorkspace.didTerminateApplicationNotification, object: nil)
 
+        // 点一下岛体 = 钉住/取消钉住（在视图层触发），这里跟进收起与日志
+        state.$pinned.dropFirst().sink { [weak self] pinned in
+            guard let self else { return }
+            if self.verbose { NSLog("[dsh-notch] 钉住状态: \(pinned ? "开（常驻展开）" : "关")") }
+            self.pinItem?.title = pinned ? "取消钉住展开 HUD" : "钉住展开 HUD"
+            self.applyExpansion()
+        }.store(in: &cancellables)
+
         installStatusItem()
         startPolling()
+        startPointerPolling()
         // accessory 策略下需显式激活，NSPanel 才会显示
         NSApp.activate(ignoringOtherApps: false)
 
+        // 启动演示：展开 2.4s 让用户确认「装上了、在跑」
+        showcaseActive = true
+        applyExpansion()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
+            self?.showcaseActive = false
+            self?.applyExpansion()
+        }
+
         // 诊断：延迟自查窗口几何（窗口注册是异步的，立刻查查不到）
-        if ProcessInfo.processInfo.environment["DSH_NOTCH_VERBOSE"] != nil {
+        if verbose {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 self?.panel?.dumpSelf()
             }
@@ -109,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate()
+        pointerTimer?.invalidate()
     }
 
     // MARK: - 菜单栏
@@ -128,11 +186,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(info)
         menu.addItem(.separator())
 
+        let help = NSMenuItem(title: "使用说明…", action: #selector(showHelp), keyEquivalent: "")
+        help.target = self
+        menu.addItem(help)
+        menu.addItem(.separator())
+
         let toggle = NSMenuItem(title: state.pinned ? "取消钉住展开 HUD" : "钉住展开 HUD",
                                 action: #selector(toggleExpanded), keyEquivalent: "")
         toggle.target = self
         pinItem = toggle
         menu.addItem(toggle)
+
+        let hover = NSMenuItem(title: "鼠标悬停展开",
+                               action: #selector(toggleHoverExpand), keyEquivalent: "")
+        hover.target = self
+        hover.state = hoverExpand ? .on : .off
+        hoverItem = hover
+        menu.addItem(hover)
 
         let idleItem = NSMenuItem(title: "空闲时自动收起",
                                   action: #selector(toggleHideWhenIdle), keyEquivalent: "")
@@ -140,6 +210,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         idleItem.state = hideWhenIdle ? .on : .off
         self.idleItem = idleItem
         menu.addItem(idleItem)
+
+        let launch = NSMenuItem(title: "开机自动启动",
+                                action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        launch.target = self
+        launch.state = Self.launchAtLoginEnabled ? .on : .off
+        launchItem = launch
+        menu.addItem(launch)
+
+        menu.addItem(.separator())
 
         let reveal = NSMenuItem(title: "在 Finder 中显示会话文件", action: #selector(revealSession), keyEquivalent: "")
         reveal.target = self
@@ -155,6 +234,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.menu = menu
     }
 
+    @objc private func showHelp() {
+        let alert = NSAlert()
+        alert.messageText = "DSH Notch 怎么用"
+        alert.informativeText = """
+        刘海就是这块浮层。它在 DeepSeek Harness 运行期间常驻。
+
+        · 鼠标移到刘海上 → 展开成大面板（看一眼就够，不用点）
+        · 移开鼠标 0.35 秒 → 自动收起
+        · 面板里的 ✕ → 取消钉住；菜单栏「钉住展开 HUD」→ 一直展开
+        · 等待人工确认时（状态变橙）会自动展开提醒你
+        · 状态色：灰=待命 蓝=思考 青=执行工具 橙=等你确认
+
+        展开面板内容：状态角标 / 当前任务 / 工具参数摘要 / 耗时 / 工具调用次数。
+
+        菜单栏波形图标里还有：悬停展开开关、空闲自动收起、开机自启、
+        定位会话文件、导出形状预览图、退出。
+
+        会话数据来自 ~/.dsh/sessions（zstd 解压后增量读取），
+        只读，不上传，不修改任何 DSH 文件。
+        """
+        NSApp.activate(ignoringOtherApps: true)
+        alert.addButton(withTitle: "知道了")
+        alert.runModal()
+    }
+
     @objc private func toggleExpanded() {
         state.pinned.toggle()
         pinItem?.title = state.pinned ? "取消钉住展开 HUD" : "钉住展开 HUD"
@@ -168,9 +272,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tick()
     }
 
+    @objc private func toggleHoverExpand() {
+        hoverExpand.toggle()
+        hoverItem?.state = hoverExpand ? .on : .off
+        if !hoverExpand {
+            hovering = false
+            hoverEnterAt = nil
+            hoverExitAt = nil
+            panel?.isInteractive = false
+            applyExpansion()
+        }
+    }
+
     private func applyExpansion() {
-        // 等待人工确认时自动展开；其余时候由「钉住」决定
-        let shouldExpand = state.pinned || state.activity.isWaitingApproval
+        // 展开条件：用户钉住 / 等人工确认 / 鼠标悬停 / 启动演示
+        let shouldExpand = state.pinned
+            || state.activity.isWaitingApproval
+            || (hoverExpand && hovering)
+            || showcaseActive
         if state.isExpanded != shouldExpand { state.isExpanded = shouldExpand }
     }
 
@@ -185,6 +304,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(URL(fileURLWithPath: dir))
     }
 
+    // MARK: - 开机自启（写用户级 LaunchAgent，无需管理员权限）
+
+    private static let launchLabel = "com.deepseek.dshnotch"
+    private static var launchAgentURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/\(launchLabel).plist")
+    }
+    private static var launchAtLoginEnabled: Bool {
+        FileManager.default.fileExists(atPath: launchAgentURL.path)
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let url = Self.launchAgentURL
+        let uid = getuid()
+        if Self.launchAtLoginEnabled {
+            Self.launchctl(["bootout", "gui/\(uid)/\(Self.launchLabel)"])
+            do {
+                try FileManager.default.removeItem(at: url)
+                NSLog("[dsh-notch] 已关闭开机自启")
+            } catch {
+                NSLog("[dsh-notch] 删除 LaunchAgent 失败: \(error.localizedDescription)")
+            }
+        } else {
+            // 从 .build 直接跑时 executablePath 指向构建产物；装到 /Applications 后
+            // 指向 app 内的可执行文件。用 Bundle.main.bundlePath 判断更稳：
+            // app 包用 `open -a` 启动，避免 LaunchAgent 直接跑可执行文件时
+            // 拿不到正确的 bundle 环境。
+            let bundlePath = Bundle.main.bundlePath
+            let isAppBundle = bundlePath.hasSuffix(".app")
+            let plist: [String: Any] = [
+                "Label": Self.launchLabel,
+                "ProgramArguments": isAppBundle
+                    ? ["/usr/bin/open", "-a", bundlePath]
+                    : [Bundle.main.executablePath ?? ""],
+                "RunAtLoad": true,
+                "KeepAlive": false,
+                "ProcessType": "Interactive",
+            ]
+            do {
+                let data = try PropertyListSerialization.data(fromPropertyList: plist,
+                                                              format: .xml, options: 0)
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                        withIntermediateDirectories: true)
+                try data.write(to: url)
+            } catch {
+                NSLog("[dsh-notch] 写 LaunchAgent 失败: \(error.localizedDescription)")
+                return
+            }
+            Self.launchctl(["bootstrap", "gui/\(uid)", url.path])
+            NSLog("[dsh-notch] 已开启开机自启: \(url.path)")
+        }
+        launchItem?.state = Self.launchAtLoginEnabled ? .on : .off
+    }
+
+    @discardableResult
+    private static func launchctl(_ args: [String]) -> Int32 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = args
+        do {
+            try p.run()
+            p.waitUntilExit()
+            if p.terminationStatus != 0 {
+                NSLog("[dsh-notch] launchctl \(args.first ?? "") 返回 \(p.terminationStatus)（可忽略）")
+            }
+            return p.terminationStatus
+        } catch {
+            NSLog("[dsh-notch] launchctl 调用失败: \(error.localizedDescription)")
+            return -1
+        }
+    }
+
     // MARK: - 轮询
 
     private func startPolling() {
@@ -192,6 +383,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.tick()
         }
         tick()
+    }
+
+    /// 指针轮询：悬停检测的唯一来源。
+    ///
+    /// 面板是 `ignoresMouseEvents = true` 的穿透窗口，**收不到 mouseEntered**，
+    /// 所以悬停不能靠窗口事件，只能主动读 `NSEvent.mouseLocation`。
+    /// 读鼠标位置不需要任何权限，也不需要辅助功能授权。
+    private func startPointerPolling() {
+        pointerTimer = Timer.scheduledTimer(withTimeInterval: pointerInterval, repeats: true) { [weak self] _ in
+            self?.pointerTick()
+        }
+    }
+
+    private func pointerTick() {
+        guard let panel, isVisible, hoverExpand else {
+            if hovering { setHovering(false) }
+            return
+        }
+
+        let p = NSEvent.mouseLocation
+        let compactHot = metrics.hoverHotRect
+        // 展开态整块也算「还在岛上」：鼠标往下挪进 HUD 读信息时不该收起
+        let currentHot = metrics.islandRect(expanded: state.isExpanded).insetBy(dx: -8, dy: -8)
+            .union(compactHot)
+        let insideHot = currentHot.contains(p)
+
+        // 交互开关跟着指针走（不留宽限）：只有指针真在岛上时才接管点击，
+        // 否则窗口矩形（480×180）会把下方应用和菜单栏的点击一起吞掉。
+        panel.isInteractive = insideHot
+
+        if !hovering {
+            // 悬停展开需要「停留」一小会儿，避免鼠标掠过往顶栏时误触发
+            if compactHot.contains(p) {
+                if let t = hoverEnterAt {
+                    if Date().timeIntervalSince(t) >= hoverDwell {
+                        hoverEnterAt = nil
+                        setHovering(true)
+                    }
+                } else {
+                    hoverEnterAt = Date()
+                }
+            } else {
+                hoverEnterAt = nil
+            }
+        } else {
+            if insideHot {
+                hoverExitAt = nil
+            } else if let t = hoverExitAt {
+                if Date().timeIntervalSince(t) >= hoverGrace {
+                    hoverExitAt = nil
+                    setHovering(false)
+                }
+            } else {
+                hoverExitAt = Date()
+            }
+        }
+    }
+
+    private func setHovering(_ value: Bool) {
+        guard hovering != value else { return }
+        hovering = value
+        if verbose { NSLog("[dsh-notch] 悬停: \(value ? "进入热区 → 展开" : "离开 → 收起")") }
+        applyExpansion()
     }
 
     private func tick() {
@@ -218,10 +472,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 常驻策略：DSH 运行中 → 常驻；DSH 退出 → 收起
         // （可选用「空闲时自动收起」把常驻改成只在干活时出现）
         let shouldShow: Bool
-        if !dshRunning {
+        if !dshRunning && !showcaseActive {
             shouldShow = false
         } else if hideWhenIdle {
-            shouldShow = activity.isActive
+            shouldShow = activity.isActive || hovering
                 || (lastActiveAt.map { Date().timeIntervalSince($0) <= idleHideDelay } ?? false)
         } else {
             shouldShow = true
@@ -239,6 +493,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func hideIfNeeded() {
         guard isVisible else { return }
         isVisible = false
+        hoverEnterAt = nil
+        panel?.isInteractive = false
         panel?.hideNotch()
     }
 

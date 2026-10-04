@@ -9,6 +9,8 @@
 #   ./build.sh            # 编译 + 打包到 .build/DSHNotch.app
 #   ./build.sh install    # 再安装到 /Applications 并重启
 #   ./build.sh preview    # 编译后离屏渲染形状预览图到 .build/preview/
+#   ./build.sh self-test  # 注入合成 NSEvent，验证点击 → 钉住链路
+#   ./build.sh probes     # 编译三个自检探针到 .build/probes/
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -43,6 +45,25 @@ case "${1:-}" in
   preview)
     echo "==> 离屏渲染形状预览"
     "$BIN" --render-preview .build/preview
+    ;;
+  self-test)
+    echo "==> 交互自检（注入合成 NSEvent）"
+    "$BIN" --self-test
+    ;;
+  probes)
+    echo "==> 编译自检探针"
+    mkdir -p .build/probes
+    # 四个探针都用 @main 入口，需要 -parse-as-library（缺了会报
+    # 'main' attribute cannot be used in a module that contains top-level code）
+    for p in screen window hover click; do
+      case "$p" in
+        hover|click) extra=(Sources/DSHNotch/Core/NotchMetrics.swift) ;;
+        *)           extra=() ;;
+      esac
+      swiftc -O -sdk "$SDK" -target arm64-apple-macos13.0 -parse-as-library \
+        -o ".build/probes/probe-$p" "tools/probe-$p.swift" ${extra[@]+"${extra[@]}"}
+    done
+    ls -1 .build/probes/
     ;;
   install)
     echo "==> 安装到 /Applications"

@@ -39,12 +39,14 @@ enum PreviewRenderer {
             }
             print("已输出 \(path)")
 
-            // 再出一张 2 倍放大的中心裁切图 —— 形状细节在全屏图里看不清
+            // 再出一张 2 倍放大的中心裁切图 —— 形状细节在全屏图里看不清。
+            // 裁切高度要盖住整块岛（展开 160pt / 折叠 50pt），否则底部信息行会被切掉。
             let zoomName = name.replacingOccurrences(of: ".png", with: "-zoom.png")
             let zoomPath = dirURL.appendingPathComponent(zoomName).path
             let cropWidth: CGFloat = expanded ? 700 : 460
+            let cropHeight: CGFloat = expanded ? 190 : 110
             let region = NSRect(x: metrics.screenFrame.midX - metrics.screenFrame.minX - cropWidth / 2,
-                                y: 0, width: cropWidth, height: 140)
+                                y: 0, width: cropWidth, height: cropHeight)
             if crop(from: rep, region: region, zoom: 2, canvasWidth: metrics.screenFrame.width, to: zoomPath) {
                 print("已输出 \(zoomPath)")
             }
