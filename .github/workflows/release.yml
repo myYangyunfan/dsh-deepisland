@@ -1,0 +1,80 @@
+name: Release
+
+# 为什么发布要放在 CI 上：
+#   作者本机所在的网络对 api.github.com 是 SNI 级阻断（github.com 正常，
+#   所以 git push 一直好使，但 gh release create 永远 502/超时）。
+#   Actions runner 在境外，创建 release 与上传附件都不受这条链路影响。
+#   git push 走 git 协议，因此「推 tag 触发发布」这条路是通的。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（须已存在，例如 v0.3.0）'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # 带刘海的 Mac 全是 Apple Silicon，产物必须是 arm64，所以要求 arm64 runner。
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          sw_vers
+          echo "架构: $(uname -m)"
+          swiftc --version | head -1
+          echo "SDK: $(xcrun --show-sdk-path)"
+
+      - name: 断言 runner 是 Apple Silicon
+        run: |
+          if [ "$(uname -m)" != "arm64" ]; then
+            echo "❌ runner 架构是 $(uname -m)，本包必须 arm64（同包的 zstdlite 也需 arm64）"
+            exit 1
+          fi
+          echo "✅ arm64"
+
+      - name: 编译 + 组装 .app + 打包
+        env:
+          # CI 没有登录图形会话，跳过需要窗口服务器的运行自检；
+          # 「zstdlite 已随包」与「代码签名完好」两项校验照常执行。
+          DSHNOTCH_SKIP_SELFTEST: '1'
+        run: |
+          cd swift
+          ./build.sh package
+          echo "--- 产物 ---"
+          ls -la .build/dist/
+
+      - name: 校验产物
+        run: |
+          cd swift
+          ZIP=$(ls .build/dist/*.zip)
+          echo "产物: $ZIP"
+          echo "--- 包内关键文件 ---"
+          unzip -l "$ZIP" | grep -E 'zstdlite|Contents/MacOS/DSHNotch$' || true
+          echo "--- 二进制架构 ---"
+          file .build/DSHNotch.app/Contents/MacOS/DSHNotch
+          file .build/DSHNotch.app/Contents/Resources/zstdlite
+
+      - name: 创建 Release（含附件）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          cd swift
+          TAG="${DISPATCH_TAG:-${GITHUB_REF_NAME}}"
+          echo "发布 tag: $TAG"
+          gh release create "$TAG" \
+            --title "DSH Notch ${TAG#v}" \
+            --generate-notes \
+            .build/dist/*.zip .build/dist/SHA256SUMS.txt \
+          || gh release upload "$TAG" \
+            .build/dist/*.zip .build/dist/SHA256SUMS.txt --clobber
+          echo "--- 发布结果 ---"
+          gh release view "$TAG"

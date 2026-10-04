@@ -131,14 +131,12 @@ case "${1:-}" in
     echo
     echo "    拿到包的人可这样验完整性（需与 SHA256SUMS.txt 同目录）："
     echo "      shasum -a 256 -c SHA256SUMS.txt"
-    # 自证：解压后必须仍能通过自检（也就是「别人拿到能用」这条路真的通）
+    # 自证：解压后必须仍然是个「别人能用的包」
     echo
-    echo "==> 打包自证：在临时目录解压并跑自检"
+    echo "==> 打包自证：在临时目录解压并校验"
     TMP=$(mktemp -d)
     ditto -x -k "$ZIP" "$TMP"
-    "$TMP/DSHNotch.app/Contents/MacOS/DSHNotch" --self-test-jump >/dev/null \
-      && echo "    ✅ 解压后二进制可运行、跳转自检通过" \
-      || { echo "    ❌ 解压后自检失败"; rm -rf "$TMP"; exit 1; }
+    # 下面两项与图形会话无关，任何环境都必须过（CI 也跑）
     if [ -x "$TMP/DSHNotch.app/Contents/Resources/zstdlite" ]; then
       echo "    ✅ 自带 zstd 解压工具已随包（无需本机预装）"
     else
@@ -148,6 +146,15 @@ case "${1:-}" in
       echo "    ✅ 代码签名完好"
     else
       echo "    ⚠️  代码签名校验未通过（临时签名，别人需按 INSTALL.md 放行）"
+    fi
+    # 运行自检需要能连上窗口服务器的图形会话；CI runner 没有登录会话，
+    # 用 DSHNOTCH_SKIP_SELFTEST=1 跳过（其余两项校验不受影响）。
+    if [ "${DSHNOTCH_SKIP_SELFTEST:-0}" = "1" ]; then
+      echo "    ⏭  跳过运行自检（DSHNOTCH_SKIP_SELFTEST=1，无图形会话）"
+    else
+      "$TMP/DSHNotch.app/Contents/MacOS/DSHNotch" --self-test-jump >/dev/null \
+        && echo "    ✅ 解压后二进制可运行、跳转自检通过" \
+        || { echo "    ❌ 解压后自检失败"; rm -rf "$TMP"; exit 1; }
     fi
     rm -rf "$TMP"
     ;;
