@@ -8,3 +8,7 @@ test/.tmp/
 
 # 本地 AI 工作记忆（不公开）
 .workbuddy/
+
+# swift 构建产物
+swift/.build/
+swift/tools/zstdlite/bin/
