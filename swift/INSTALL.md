@@ -30,6 +30,9 @@
 
 ## 方式一：下载现成包
 
+> 注：如果 Releases 页上**还没有**这个版本的包，说明还没发布 —— 走下面的方式二，
+> 或者直接找给你这份说明的人要 zip。
+
 1. 打开 Releases 页：<https://github.com/myYangyunfan/dsh-deepisland/releases>
 2. 把这两个文件下到同一个目录（比如「下载」）：
    - `DSHNotch-0.3.0-arm64.zip`
