@@ -68,16 +68,18 @@ DSH 里按 `⌘K` 再 `⌘V` 即定位。授予「辅助功能」权限后，`�
 （DSH 只对外注册了 `dsh://open` 一条深链，没有「打开第 N 个对话」的接口，
 所以只能这么绕 —— 详见 [`swift/README.md`](./swift/README.md) 的「跳转到对话」。）
 
-安装与自检：
+安装（**别人要装到自己机器上，看 [`swift/INSTALL.md`](./swift/INSTALL.md)** ——
+那里写了「下载现成包」和「从源码编译」两条路，含 Gatekeeper 放行）：
 
 ```bash
 cd swift
 ./build.sh install     # 编译 + 打包 + 装到 /Applications 并启动
+./build.sh package     # 产出可分发 zip（.build/dist/，附 SHA256SUMS.txt）
 ./build.sh all-tests   # 交互 / 投影 / 多会话 / 跳转 四套自检
 ./build.sh preview     # 离屏渲染形状预览图（校验形状读起来像不像刘海延伸）
 ```
 
-详见 [`swift/README.md`](./swift/README.md)。
+详见 [`swift/README.md`](./swift/README.md) 与 [`swift/INSTALL.md`](./swift/INSTALL.md)。
 
 ---
 

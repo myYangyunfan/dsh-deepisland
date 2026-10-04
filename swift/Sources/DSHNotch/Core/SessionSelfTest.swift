@@ -17,6 +17,8 @@ final class SessionSelfTest {
         testOrder()
         print("· 展开尺寸随会话数变化")
         testSizes(metrics)
+        print("· 无刘海屏尺寸（不得塌成 0）")
+        testNoNotch()
         print("· 停摆会话降级（避免历史会话显示成「正在执行」）")
         testStaleDemotion()
         print("· 真实多会话发现与轮询")
@@ -77,6 +79,33 @@ final class SessionSelfTest {
         var withTool = entry("d", .tool, ageSec: 1)
         withTool.activity.currentTool = "bash"
         check(withTool.shortTag == "bash", "有工具名时短标签用工具名")
+    }
+
+    // MARK: - 无刘海屏（M1 Air / iMac / 合盖只接外接屏）
+
+    /// 无刘海时曾经 `compactSize.height == 0`（notchHeight 0 + infoBandHeight 0），
+    /// 折叠态面板整个不可见、只剩一条 16pt 悬停热区碰运气。这条断言把它钉死。
+    ///
+    /// 尺寸是构造出来的假屏幕，不依赖真机 —— 本机是带刘海的 Air，没有无刘海环境可用。
+    private func testNoNotch() {
+        let plain = NotchMetrics(screenFrame: NSRect(x: 0, y: 0, width: 1440, height: 900),
+                                 notchRect: NSRect(x: 620, y: 900, width: 200, height: 0),
+                                 hasNotch: false)
+
+        check(plain.notchHeight == 0, "无刘海时 notchHeight 为 0")
+        check(plain.compactSize.height > 0,
+              "无刘海时折叠态高度不得为 0（实得 \(plain.compactSize.height)pt）")
+        check(plain.compactSize.height >= 24, "无刘海折叠态高度够放一行文字（≥24pt）")
+        check(plain.compactSize.width > 0, "无刘海折叠态有宽度")
+        check(plain.expandedSize(sessionRows: 1).height > plain.compactSize.height,
+              "无刘海时展开高于折叠")
+        check(plain.expandedSize(sessionRows: 6).height > plain.expandedSize(sessionRows: 1).height,
+              "无刘海时 6 会话高于 1 会话")
+        check(plain.islandRect(expanded: false).height > 0, "无刘海时折叠命中的高度非 0")
+        check(plain.islandRect(expanded: false).maxY == plain.screenFrame.maxY,
+              "无刘海时岛体仍严格贴屏幕顶端")
+        check(plain.windowSize.height >= plain.expandedSize(sessionRows: 6).height,
+              "窗口按最大展开态开（无刘海时不裁）")
     }
 
     // MARK: - 尺寸

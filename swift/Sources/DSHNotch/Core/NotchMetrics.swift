@@ -77,8 +77,14 @@ struct NotchMetrics {
     /// 窗口按**最大**展开尺寸开：展开时只改形状高度，窗口不动，动画不会被裁。
     var maxExpandedSize: CGSize { expandedSize(sessionRows: NotchMetrics.maxSessionRows) }
 
-    /// 刘海下方那条用来显示文字的信息带高度
-    var infoBandHeight: CGFloat { hasNotch ? 22 : 0 }
+    /// 刘海下方那条用来显示文字的信息带高度。
+    ///
+    /// 有刘海：刘海本身那 28pt 是物理挖孔，文字带必须让开，另起 22pt。
+    /// 无刘海（M1 Air / iMac / 合盖只接外接屏）：没有挖孔要避，但**不能返回 0** ——
+    /// 折叠态高度 = notchHeight + infoBandHeight = 0 + 0 = 0，实测 `compactSize`
+    /// 会塌成 320×0，面板整个不可见（只剩一条 16pt 高的悬停热区碰运气）。
+    /// 所以无刘海时给它一个自带高度的悬浮条。
+    var infoBandHeight: CGFloat { hasNotch ? 22 : 26 }
 
     /// 面板窗口外扩（给光晕/阴影留绘制空间，顶端不外扩）
     static let bleed: CGFloat = 20

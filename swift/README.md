@@ -170,6 +170,9 @@ auxiliaryTopRightArea = (718, 804, 562, 28)
 
 ## 编译
 
+**别人要装到自己机器上 → 看 [`INSTALL.md`](./INSTALL.md)**（两条路：下载现成包 / 从源码编译，
+含 Gatekeeper 放行与卸载）。下面只讲本仓库的构建脚本。
+
 本机只有 Command Line Tools（无完整 Xcode），`swift build` 会报
 `unable to lookup item 'PlatformPath'`，因此**直接用 `swiftc`**。已封装成脚本：
 
@@ -178,19 +181,23 @@ cd swift
 ./build.sh              # 编译 + 打包 .build/DSHNotch.app
 ./build.sh preview      # 再离屏渲染形状预览图到 .build/preview/
 ./build.sh install      # 再安装到 /Applications 并启动
+./build.sh package      # 产出可分发 zip 到 .build/dist/（附 SHA256SUMS.txt + 打包自证）
 ./build.sh self-test    # 交互自检（注入合成 NSEvent）
 ./build.sh proj-test    # 投影自检（真实缓存 + 事件流端到端）
-./build.sh sess-test    # 多会话自检（排序 / 尺寸 / 停摆降级 / 真实发现）
+./build.sh sess-test    # 多会话自检（排序 / 尺寸 / 无刘海尺寸 / 停摆降级 / 真实发现）
 ./build.sh jump-test    # 跳转自检（深链 / 剪贴板 / 反馈文案）
 ./build.sh all-tests    # 上面四套自检全跑一遍
 ./build.sh probes       # 编译全部自检探针到 .build/probes/
 ```
 
+架构默认跟随本机（`uname -m`），可用 `DSHNOTCH_ARCH=x86_64 ./build.sh …` 覆盖。
+带刘海的 MacBook 全是 Apple Silicon，所以 arm64 是主要目标。
+
 脚本内部等价于：
 
 ```bash
 SDK=$(xcrun --show-sdk-path)
-swiftc -O -sdk "$SDK" -target arm64-apple-macos13.0 -parse-as-library \
+swiftc -O -sdk "$SDK" -target "$(uname -m)-apple-macos13.0" -parse-as-library \
   -o .build/DSHNotch Sources/DSHNotch/Core/*.swift Sources/DSHNotch/UI/*.swift Sources/DSHNotch/App.swift
 ```
 
@@ -444,8 +451,13 @@ DSH 的会话文件是 zstd 压缩的，而 macOS SDK **不提供 libzstd**。
 >
 > 正确性已用官方 python `zstandard` 逐字节比对验证（1368905 字节完全一致）。
 
-搜索顺序：`DSH_NOTCH_ZSTD` 环境变量 → App 同目录 → `Contents/Resources` →
-`~/.local/bin/zstdlite` → `zstd`（homebrew/系统）→ `$PATH`。
+搜索顺序：`DSH_NOTCH_ZSTD` 环境变量 → `Contents/Resources`（随包分发的那份）
+→ App 可执行文件同目录 → `~/.local/bin/zstdlite` → `zstd`（homebrew/系统）→ `$PATH`。
+
+> **`Contents/Resources` 这一条是分发的前提。** 早期只找「可执行文件同目录」，
+> 而 `build.sh` 把工具放在 `Contents/Resources` —— 两者对不上，本机因为恰好有
+> `~/.local/bin/zstdlite` 才没暴露；别人拿到 `.app` 是没有那份的，
+> 会完全读不到会话（面板一直空白）。`./build.sh package` 的打包自证里加了这条检查。
 
 ## 诊断
 
@@ -600,6 +612,12 @@ projections: session-a59ae858….json seq=159 turns=6 steps=16 out=10567 ctx=1.5
 - **投影缓存缺失时自动降级**：读不到 `session_projcache` 就只展示事件流
   能给的字段（动作、工具名、耗时、轮次步数），token / 上下文 / 待办不显示。
   两个数据源都是只读，任何一侧失败都不会影响另一侧。
+- **无刘海屏（M1 Air / iMac / 合盖只接外接屏）形态不同**：没有物理挖孔，
+  折叠态是 320×26 的贴顶悬浮条（有刘海时是 208×50 的刘海延伸条）。
+  这条路径只有**离线渲染**验证（`--render-preview-nonotch`）+ 8 条尺寸断言，
+  **没有真机**。曾经这里塌成高度 0（`notchHeight 0 + infoBandHeight 0`），
+  面板整个不可见 —— 现已给无刘海态一个自有高度，断言钉在 `testNoNotch`。
+  悬浮条贴在最顶上，可能压住菜单栏左侧文字（它不接收鼠标事件，菜单仍可点）。
 - 无硬件刘海的屏会退化为屏幕顶部悬浮药丸（`NotchMetrics` 已做回退，
   但样式未针对无刘海屏调优）。
 - 折叠态胶囊比刘海宽 52pt，会盖住刘海两侧各 26pt 的菜单栏空白区；

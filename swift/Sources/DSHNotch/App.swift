@@ -27,6 +27,20 @@ enum DSHNotchMain {
             return
         }
 
+        // 自检模式：模拟**无刘海**屏（M1 Air / iMac / 合盖只接外接屏）渲染。
+        // 本机是带刘海的 Air，没有无刘海环境，只能靠假几何把这条路径画出来看。
+        if let idx = CommandLine.arguments.firstIndex(of: "--render-preview-nonotch"),
+           idx + 1 < CommandLine.arguments.count {
+            _ = NSApplication.shared
+            let dir = CommandLine.arguments[idx + 1]
+            let metrics = NotchMetrics(screenFrame: NSRect(x: 0, y: 0, width: 1440, height: 900),
+                                       notchRect: NSRect(x: 620, y: 900, width: 200, height: 0),
+                                       hasNotch: false)
+            print("[dsh-notch] 无刘海模拟屏：\(metrics.describe)")
+            PreviewRenderer.render(to: dir, metrics: metrics)
+            return
+        }
+
         // 自检模式：向窗口注入合成事件，验证点击 → 钉住这条链路
         if CommandLine.arguments.contains("--self-test") {
             _ = NSApplication.shared
@@ -202,6 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DSH 运行中: \(dshRunning)
         辅助功能权限: \(SessionJump.canSendKeys ? "已授权 → 点对话会置前 DSH 并自动 ⌘K/粘贴" : "未授权 → 点对话只置前 DSH + 复制标题")
         跳转深链: \(SessionJump.dshOpenURL.absoluteString)
+        zstd 解压工具: \(SessionSource.zstdToolPath ?? "未找到 → 读不到任何会话（面板会一直空白）")
         会话候选: \(source.sessionFiles().count) 个
         """
         try? text.write(to: dir.appendingPathComponent("last-launch.txt"),

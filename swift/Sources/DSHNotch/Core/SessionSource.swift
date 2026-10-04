@@ -215,7 +215,18 @@ final class SessionSource {
         if let o = ProcessInfo.processInfo.environment["DSH_NOTCH_ZSTD"],
            FileManager.default.isExecutableFile(atPath: o) { candidates.append(o) }
 
-        // 随 App 打包的资源（Bundle.resources / 可执行文件同目录）
+        // ① 随 App 打包的资源：build.sh 把 zstdlite 放在 Contents/Resources/，
+        //    可执行文件却在 Contents/MacOS/ —— **两处都要找**。
+        //
+        //    早期只找 exeDir，本机因为恰好存在 ~/.local/bin/zstdlite 才没暴露；
+        //    别人拿到 .app 是没有那份的，会完全读不到会话（面板一直空白）。
+        //    这是分发时必须成立的一条路径，等同于自带依赖。
+        if let res = Bundle.main.resourcePath {
+            candidates.append("\(res)/zstdlite")
+            candidates.append("\(res)/zstd")
+        }
+
+        // ② 可执行文件同目录（开发期把工具放在 .build/ 旁边也能用）
         let exeDir = URL(fileURLWithPath: CommandLine.arguments.first ?? "")
             .resolvingSymlinksInPath()
             .deletingLastPathComponent()
