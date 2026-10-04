@@ -47,6 +47,13 @@ enum DSHNotchMain {
             exit(test.run() ? 0 : 1)
         }
 
+        // 自检模式：跳转链路（深链 / 剪贴板 / 文案；不做真实跳转）
+        if CommandLine.arguments.contains("--self-test-jump") {
+            _ = NSApplication.shared
+            let test = JumpSelfTest()
+            exit(test.run() ? 0 : 1)
+        }
+
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -150,9 +157,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.applyExpansion()
         }.store(in: &cancellables)
 
+        // 点某个对话 = 跳到那个对话（视图只报「点了哪个」，副作用留在这一层）
+        state.onOpenSession = { [weak self] entry in
+            self?.openSession(entry)
+        }
+
         installStatusItem()
         startPolling()
         startPointerPolling()
+        writeLaunchDiagnostics()
         // accessory 策略下需显式激活，NSPanel 才会显示
         NSApp.activate(ignoringOtherApps: false)
 
@@ -170,6 +183,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.panel?.dumpSelf()
             }
         }
+    }
+
+    /// 把启动时的关键状态落到一个文件里。
+    ///
+    /// 为什么不用日志：本机统一日志读不到本进程的 NSLog（`log show` 与
+    /// `log stream` 都抓不到，实测 0 行），而这是个**没有终端**的常驻 GUI ——
+    /// 出问题时手里一点线索都没有。写个小文件最省事：既能自己诊断，
+    /// 用户也能直接把内容发出来。
+    private func writeLaunchDiagnostics() {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/DSHNotch", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let text = """
+        DSH Notch 启动诊断
+        时间: \(Date())
+        屏幕: \(metrics.describe)
+        DSH 运行中: \(dshRunning)
+        辅助功能权限: \(SessionJump.canSendKeys ? "已授权 → 点对话会置前 DSH 并自动 ⌘K/粘贴" : "未授权 → 点对话只置前 DSH + 复制标题")
+        跳转深链: \(SessionJump.dshOpenURL.absoluteString)
+        会话候选: \(source.sessionFiles().count) 个
+        """
+        try? text.write(to: dir.appendingPathComponent("last-launch.txt"),
+                        atomically: true, encoding: .utf8)
     }
 
     static func isDSHRunning() -> Bool {
@@ -238,6 +274,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         launchItem = launch
         menu.addItem(launch)
 
+        // 自动定位对话（替用户按 ⌘K ⌘V）唯一的前置条件
+        let ax = NSMenuItem(title: SessionJump.canSendKeys
+                                ? "辅助功能已授权（点对话自动定位）"
+                                : "授予辅助功能权限（自动定位对话）…",
+                            action: #selector(requestAccessibility), keyEquivalent: "")
+        ax.target = self
+        menu.addItem(ax)
+
         menu.addItem(.separator())
 
         let reveal = NSMenuItem(title: "在 Finder 中显示会话文件", action: #selector(revealSession), keyEquivalent: "")
@@ -284,6 +328,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         菜单栏波形图标里还有：悬停展开开关、空闲自动收起、开机自启、
         定位会话文件、导出形状预览图、退出。
 
+        ── 跳转到对话 ──
+        展开态里点某一行对话（单会话时点中间那块正文）→ DSH 被拉到前台，
+        同时那个会话的标题进了剪贴板。接着在 DSH 里按 ⌘K 打开会话搜索、
+        ⌘V 粘贴，就能定位过去。
+
+        若在菜单栏里授予「辅助功能」权限，⌘K 与粘贴这两步会替你完成，
+        只剩一个回车确认。
+
+        为什么不能一键直达：DSH 对外只注册了 dsh://open 这一条深链，
+        作用是「把主窗口拉到前台」；它的主界面是无 URL 路由的 SPA，
+        也没有任何「打开第 N 个对话」的外部接口。所以跳转只能复用
+        DSH 自己的 ⌘K 会话搜索 —— 全程对 DSH 本体零改动、零注入。
+
         ── 数据 ──
         数据来自 ~/.dsh/sessions（事件流，zstd 解压后增量读取）与
         ~/.dsh/storages/session_projcache（DSH 自己的状态投影，
@@ -328,6 +385,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             || (hoverExpand && hovering)
             || showcaseActive
         if state.isExpanded != shouldExpand { state.isExpanded = shouldExpand }
+    }
+
+    // MARK: - 跳转到对话
+
+    /// 点岛上的对话 → 跳到 DSH 里的那个对话。
+    ///
+    /// 只做两件确定成立的事：把 DSH 置前（唯一官方深链 `dsh://open`）、
+    /// 把标题放进剪贴板。若已获辅助功能权限，`SessionJump` 还会补发
+    /// ⌘K + ⌘V，用户只剩一个回车。
+    ///
+    /// 「打开第 N 个对话」在 DSH 侧没有官方入口，原因见 `SessionJump` 的注释。
+    private func openSession(_ entry: SessionEntry) {
+        let outcome = SessionJump.open(entry)
+        NSLog("[dsh-notch] 跳转「\(entry.label)」→ \(outcome.brief)")
+        state.jumpFeedback = outcome.brief
+        // 反馈留 2.4s：够看清，又不会长期占住 header 的提示位
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
+            self?.state.jumpFeedback = nil
+        }
+    }
+
+    /// 辅助功能权限：这是「自动定位」（替用户按 ⌘K ⌘V）的唯一前提。
+    ///
+    /// 没授权时 `CGEvent.post` 会被系统静默丢弃 —— 不是报错，是没反应，
+    /// 所以这里主动把授权入口摆出来，而不是让用户猜为什么点了没效果。
+    @objc private func requestAccessibility() {
+        if SessionJump.canSendKeys {
+            let alert = NSAlert()
+            alert.messageText = "已获辅助功能权限"
+            alert.informativeText = """
+            点岛上的对话行时，除了把 DSH 拉到前台、把标题放进剪贴板，
+            还会自动替你打开会话搜索（⌘K）并粘好标题 —— 你只需回车确认。
+
+            （刚在系统设置里勾上的话，重启一次 DSH Notch 才会生效。）
+            """
+            alert.addButton(withTitle: "好")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
+
+        // 先触发系统自己的授权询问（带「打开系统设置」）
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(opts)
+        // 再把「辅助功能」这一页直接打开，省得用户自己去翻
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     @objc private func revealSession() {

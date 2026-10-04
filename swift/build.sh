@@ -61,6 +61,10 @@ case "${1:-}" in
     echo "==> 多会话自检（排序 / 尺寸 / 停摆降级 / 真实发现）"
     "$BIN" --self-test-sessions
     ;;
+  jump-test)
+    echo "==> 跳转自检（深链 / 剪贴板 / 文案）"
+    "$BIN" --self-test-jump
+    ;;
   all-tests)
     echo "==> 交互自检"
     "$BIN" --self-test
@@ -70,6 +74,9 @@ case "${1:-}" in
     echo
     echo "==> 多会话自检"
     "$BIN" --self-test-sessions
+    echo
+    echo "==> 跳转自检"
+    "$BIN" --self-test-jump
     ;;
   probes)
     echo "==> 编译自检探针"

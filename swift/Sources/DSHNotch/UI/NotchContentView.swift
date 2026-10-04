@@ -22,7 +22,16 @@ final class NotchViewState: ObservableObject {
     /// 当前时间（毫秒），每 tick 更新，让耗时分秒能自己走字
     @Published var now: Double = Date().timeIntervalSince1970 * 1000
 
-    /// 主会话 id（列表排序第一的那个；无会话时为 nil）
+    /// 跳转后留在岛上的一行反馈（如「已复制标题 · ⌘K 粘贴」），由 App 层定时清空
+    @Published var jumpFeedback: String?
+
+    /// 点击某个对话时的回调 —— App 层负责置前 DSH 与写剪贴板。
+    ///
+    /// 视图只报「点到了哪个会话」，不做跳转本身：置前别的应用、覆盖剪贴板
+    /// 都是有副作用的动作，得留在 App 层统一记账。
+    var onOpenSession: ((SessionEntry) -> Void)?
+
+    /// 主会话 id（列表排序第一个的那个；无会话时为 nil）
     var primaryId: String? { sessions.first?.id }
 }
 
@@ -247,6 +256,9 @@ struct NotchContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.07)))
+                // 单会话时，这块正文就是「这个对话」的代表 —— 点它即跳转
+                .contentShape(Rectangle())
+                .onTapGesture { openPrimarySession() }
 
             todoRow
 
@@ -307,20 +319,35 @@ struct NotchContentView: View {
 
             Spacer(minLength: 4)
 
-            if state.pinned {
-                Label("已钉住 · 点一下取消", systemImage: "pin.fill")
-                    .font(.system(size: 9.5))
-                    .foregroundColor(glow.opacity(0.9))
-                    .fixedSize()
-            } else {
-                Text("移开鼠标收起 · 点一下钉住")
-                    .font(.system(size: 9.5))
-                    .foregroundColor(Color(white: 0.34))
-                    .fixedSize()
-            }
+            hintArea
         }
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5).offset(y: 3)
+        }
+    }
+
+    /// header 右侧的提示 / 反馈区。
+    ///
+    /// 优先级：**跳转反馈 > 钉住状态 > 默认用法提示**。
+    /// 用户刚点完一个对话，最想知道的是「跳没跳成、下一步做什么」，
+    /// 这时候再显示「已钉住」属于答非所问。
+    @ViewBuilder
+    private var hintArea: some View {
+        if let fb = state.jumpFeedback {
+            Label(fb, systemImage: "arrow.up.forward.app")
+                .font(.system(size: 9.5))
+                .foregroundColor(Color(red: 0.55, green: 0.92, blue: 0.72))
+                .fixedSize()
+        } else if state.pinned {
+            Label("已钉住 · 点状态行取消", systemImage: "pin.fill")
+                .font(.system(size: 9.5))
+                .foregroundColor(glow.opacity(0.9))
+                .fixedSize()
+        } else {
+            Text("点对话跳转 · 点状态行钉住")
+                .font(.system(size: 9.5))
+                .foregroundColor(Color(white: 0.34))
+                .fixedSize()
         }
     }
 
@@ -367,6 +394,9 @@ struct NotchContentView: View {
         .padding(.vertical, 2)
         .background(RoundedRectangle(cornerRadius: 5)
             .fill(Color.white.opacity(isPrimary ? 0.09 : 0.0)))
+        // 点这一行 = 跳到那个对话（置前 DSH + 标题进剪贴板）
+        .contentShape(Rectangle())
+        .onTapGesture { state.onOpenSession?(s) }
     }
 
     /// 行内耗时。只在会话**活跃**时显示 —— 待命会话的 `turnStartTime` 是上一回合的
@@ -374,6 +404,12 @@ struct NotchContentView: View {
     private func rowElapsed(_ s: SessionEntry) -> String {
         guard s.isLive, let t0 = s.activity.turnStartTime else { return "--:--" }
         return Activity.formatDuration(ms: state.now - t0)
+    }
+
+    /// 单会话布局没有「行」可以点，跳转目标就是唯一的那个会话（排序第一 = 主会话）
+    private func openPrimarySession() {
+        guard let s = state.sessions.first else { return }
+        state.onOpenSession?(s)
     }
 
     /// 首行：状态角标 + 标题 + 轮次 + 交互提示
@@ -403,17 +439,7 @@ struct NotchContentView: View {
                     .fixedSize()
             }
 
-            if state.pinned {
-                Label("已钉住 · 点一下取消", systemImage: "pin.fill")
-                    .font(.system(size: 9.5))
-                    .foregroundColor(glow.opacity(0.9))
-                    .fixedSize()
-            } else {
-                Text("移开鼠标收起 · 点一下钉住")
-                    .font(.system(size: 9.5))
-                    .foregroundColor(Color(white: 0.34))
-                    .fixedSize()
-            }
+            hintArea
         }
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5).offset(y: 3)
