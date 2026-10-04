@@ -30,6 +30,24 @@
 
 ---
 
+## 🖥️ 两套方案：窗口内插件 vs 系统级刘海
+
+| 方案 | 位置 | 常驻性 | 目录 |
+| :--- | :--- | :--- | :--- |
+| **DSH 插件**（本 README 主角） | DSH 窗口内 DOM 覆盖层 | 跟随 DSH 窗口 | `lib/` |
+| **DSH Notch**（原生 App） | Mac 物理刘海（NSPanel） | 系统级，切到任何 App 都可见 | [`swift/`](./swift/README.md) |
+
+两套同时启用会在 DSH 窗口内出现「应用内中部岛 + 真实刘海岛」两个状态栏，视觉冗余。
+**只想要系统级那一个时，把插件从 profile 的 bundle 列表里摘掉即可**：
+
+```bash
+# 编辑 ~/.dsh/profiles/desktop/package.json，从 dsh.profile.bundles 移除该插件
+#   "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
+# 依赖项可以不删（保留安装状态，随时能在插件管理里重新启用），重启 DSH 生效
+```
+
+---
+
 ## 📁 插件工程结构
 
 ```text

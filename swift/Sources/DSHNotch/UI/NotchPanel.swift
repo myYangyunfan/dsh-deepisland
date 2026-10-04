@@ -3,20 +3,24 @@ import SwiftUI
 
 /// 贴在物理刘海上的浮动面板。
 ///
-/// 三个关键属性（缺一不可，否则会读作「悬浮黑盒子」而非系统的一部分）：
+/// 关键属性（缺一不可，否则会读作「悬浮黑盒子」而非系统的一部分）：
 /// - `level = .statusBar`：浮在普通应用窗口之上
 /// - `ignoresMouseEvents`：鼠标穿透，不抢用户正在做的事
 /// - `collectionBehavior`：跨桌面 / 全屏都常驻
+/// - `hidesOnDeactivate = false`：默认 NSPanel 在应用失焦时会隐藏，而灵动岛必须常驻
 ///
-/// 另外 `hidesOnDeactivate = false` 很关键——默认 NSPanel 在应用失焦时会隐藏，
-/// 而灵动岛必须在你切到别的 App 时依然可见。
+/// ## 定位：窗口顶端 = 屏幕顶端
+///
+/// 窗口尺寸按**展开态**取最大（这样展开时不需要改窗口大小，动画不会被裁），
+/// 内容视图用 `bleed` 左右/底部留白包住，并**顶对齐**钉在窗口顶部。
+/// 于是形状的顶边精确落在屏幕顶边，两个方角隐没在屏幕边界上。
 final class NotchPanel: NSPanel {
-    /// 内容尺寸（不含阴影留白）
-    var contentSize = NSSize(width: 250, height: 34)
-    /// 阴影/光晕留白
-    private let shadowPadding: CGFloat = 22
+    private let metrics: NotchMetrics
+    /// 内容容器（窗口比内容大，用于容纳光晕外溢）
+    private let container = NSView(frame: .zero)
 
-    init() {
+    init(metrics: NotchMetrics) {
+        self.metrics = metrics
         super.init(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -27,52 +31,71 @@ final class NotchPanel: NSPanel {
         backgroundColor = .clear
         hasShadow = false
         isMovableByWindowBackground = false
-        // 关键：切到其他 App 时不隐藏
         hidesOnDeactivate = false
-        // 关键：浮在普通窗口之上（.statusBar 档位，恰好在菜单栏所在层级）
         level = .statusBar
-        // 关键：跨所有桌面、全屏辅助、忽略窗口循环
         collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        // 默认鼠标穿透；展开时按需关闭
         ignoresMouseEvents = true
+
+        container.wantsLayer = true
+        container.layer?.backgroundColor = .clear
+        contentView = container
+        setFrame(NSRect(origin: metrics.windowOrigin, size: metrics.windowSize),
+                 display: false)
+        container.frame = NSRect(origin: .zero, size: metrics.windowSize)
     }
 
-    /// 覆盖整个刘海区域所需的总尺寸。
-    private var totalSize: NSSize {
-        NSSize(width: contentSize.width + shadowPadding * 2,
-               height: contentSize.height + shadowPadding)
+    /// 屏幕是否有硬件刘海
+    var screenHasNotch: Bool { metrics.hasNotch }
+
+    /// **必须覆盖**：默认实现会把窗口约束在 `screen.visibleFrame` 内
+    /// （即排除菜单栏/刘海那 28pt 带状区域），于是 `setFrame` 之后
+    /// 窗口被往下挤、位置完全不对 —— 本机实测请求 (400, 652, 480, 180)
+    /// 被约束成 (424, 41, 432, 163)（CGWindow 坐标），顶边离屏顶 41pt。
+    /// 灵动岛要的正是压在菜单栏/刘海上，所以原样返回。
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
     }
 
-    /// 主屏是否有硬件刘海。
-    static var screenHasNotch: Bool {
-        // 优先主屏，否则找第一个有刘海的屏
-        for screen in ([NSScreen.main] + NSScreen.screens).compactMap({ $0 }) {
-            if screen.safeAreaInsets.top > 0 { return true }
+    /// 安装内容视图（宿主尺寸 = 窗口尺寸，内容自己在内部顶端居中）。
+    ///
+    /// 只建立一次 —— 视图树由 `NotchViewState` 驱动刷新；
+    /// 反复重建 NSHostingView 会打断 SwiftUI 的展开动画。
+    func installContent<V: View>(_ content: V) {
+        let hosting = NSHostingView(rootView: content)
+        hosting.frame = NSRect(origin: .zero, size: metrics.windowSize)
+        hosting.autoresizingMask = []
+        container.subviews.forEach { $0.removeFromSuperview() }
+        container.addSubview(hosting)
+    }
+
+    /// 显示面板（每次显示都重新校准位置：屏幕分辨率/排列可能变化）。
+    func present() {
+        let want = NSRect(origin: metrics.windowOrigin, size: metrics.windowSize)
+        setFrame(want, display: false)
+        if want != frame {
+            NSLog("[dsh-notch] 窗口定位: 期望 \(want) 实际 \(frame)")
         }
-        return false
-    }
-
-    /// 目标屏幕：有刘海的用之，否则退回主屏。
-    static var targetScreen: NSScreen? {
-        if let m = NSScreen.main, m.safeAreaInsets.top > 0 { return m }
-        return NSScreen.screens.first { $0.safeAreaInsets.top > 0 } ?? NSScreen.main
-    }
-
-    /// 显示内容（SwiftUI）。
-    func showNotch<V: View>(_ content: V) {
-        let hosting = NSHostingView(rootView: content
-            .frame(width: contentSize.width, height: contentSize.height)
-        )
-        contentView = hosting
-
-        guard let screen = Self.targetScreen else { return }
-        let total = totalSize
-        // 必须用 screen.frame（而非 visibleFrame）——后者会排除刘海/菜单栏区域
-        let x = screen.frame.origin.x + (screen.frame.width - total.width) / 2
-        let y = screen.frame.origin.y + screen.frame.height - total.height
-        setFrame(CGRect(x: x, y: y, width: total.width, height: total.height), display: false)
-
+        alphaValue = 1
         orderFront(nil)
+    }
+
+    /// 自证：把本进程自己的窗口几何打出来。
+    ///
+    /// 外部工具（无屏幕录制权限）看到的其他应用窗口信息可能被系统裁掉/改写，
+    /// 只有自报数据可信。注意必须**延迟**调用：`orderFront` 之后窗口注册到
+    /// 窗口服务器是异步的，立刻查询会一条都查不到。
+    func dumpSelf() {
+        let pid = Int(ProcessInfo.processInfo.processIdentifier)
+        NSLog("[dsh-notch] NSWindow.frame(AppKit 左下原点) = \(frame) | screen.frame = \(String(describing: screen?.frame))")
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                    kCGNullWindowID) as? [[String: Any]] else { return }
+        for w in list {
+            guard (w[kCGWindowOwnerPID as String] as? Int) == pid else { continue }
+            let b = w[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+            NSLog(String(format: "[dsh-notch] 自身窗口 layer=%@ bounds(CG, 左上原点) x=%.1f y=%.1f w=%.1f h=%.1f",
+                         "\(w[kCGWindowLayer as String] ?? "?")",
+                         b["X"] ?? -1, b["Y"] ?? -1, b["Width"] ?? -1, b["Height"] ?? -1))
+        }
     }
 
     /// 收起（淡出后 orderOut）。
@@ -86,7 +109,7 @@ final class NotchPanel: NSPanel {
         }
     }
 
-    /// 立即隐藏（无动画），供无刘海屏降级时使用。
+    /// 立即隐藏（无动画），供降级场景使用。
     func hideImmediately() {
         orderOut(nil)
     }
