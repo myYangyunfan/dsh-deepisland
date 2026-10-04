@@ -10,7 +10,8 @@
 #   ./build.sh install    # 再安装到 /Applications 并重启
 #   ./build.sh preview    # 编译后离屏渲染形状预览图到 .build/preview/
 #   ./build.sh self-test  # 注入合成 NSEvent，验证点击 → 钉住链路
-#   ./build.sh probes     # 编译三个自检探针到 .build/probes/
+#   ./build.sh proj-test  # 在真实投影缓存 + 事件流上验证指标解析
+#   ./build.sh probes     # 编译自检探针到 .build/probes/
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -50,12 +51,16 @@ case "${1:-}" in
     echo "==> 交互自检（注入合成 NSEvent）"
     "$BIN" --self-test
     ;;
+  proj-test)
+    echo "==> 投影自检（真实缓存 + 事件流端到端）"
+    "$BIN" --self-test-projections
+    ;;
   probes)
     echo "==> 编译自检探针"
     mkdir -p .build/probes
-    # 四个探针都用 @main 入口，需要 -parse-as-library（缺了会报
+    # 探针都用 @main 入口，需要 -parse-as-library（缺了会报
     # 'main' attribute cannot be used in a module that contains top-level code）
-    for p in screen window hover click; do
+    for p in screen window hover click pixels; do
       case "$p" in
         hover|click) extra=(Sources/DSHNotch/Core/NotchMetrics.swift) ;;
         *)           extra=() ;;

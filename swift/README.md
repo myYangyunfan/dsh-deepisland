@@ -17,15 +17,33 @@
 
 | 操作 | 结果 |
 |---|---|
-| **鼠标移到刘海上**（停留约 0.2 秒） | 展开成大面板（440×160） |
+| **鼠标移到刘海上**（停留约 0.2 秒） | 展开成大面板（440×176） |
 | **鼠标移开**（超过 0.35 秒） | 自动收起 |
 | **在岛上点一下** | 钉住（常驻展开）／再点一下取消 |
 | 状态变橙（等待人工确认） | 自动展开提醒，不用手点 |
+| 任务跑完 | 保持绿色「任务已完成」约 5 秒，再自动收起 |
 | 菜单栏波形图标 | 使用说明 / 钉住展开 / 悬停展开开关 / 空闲自动收起 / 开机自启 / 定位会话文件 / 导出形状预览图 / 退出 |
 
-状态色与 DSH 插件端一致：灰=待命、蓝=思考、青=执行工具、橙=等你确认。
-展开面板显示：状态角标、当前任务、工具参数摘要、耗时、工具调用次数。
+状态色：灰=待命、蓝=思考、青=执行工具、橙=等你确认、绿=已完成。
+
 启动后会自动展开 2.4 秒作为「我在跑」的演示。
+
+### 展示哪些信息
+
+| 位置 | 内容 |
+|---|---|
+| **折叠态**（208×50） | 状态点、当前动作、工具名（或子代理并发数）、本回合耗时 |
+| 折叠态·仅在上下文吃紧时 | 占用百分比（>50% 转琥珀、>80% 转红）——常态不占位 |
+| **展开态**（440×176） | 状态角标、当前任务、**轮次与步数** `T3·S98`、**工具参数正文**（等宽、最多 3 行）、**待办进度 + 当前待办项**、耗时、工具调用次数、**输出 token**、**上下文占用百分比**、**在飞工具/子代理数**、模型名与权限预设 |
+
+几条判读规则：
+
+- **工具参数正文**按 `command → file_path/path → pattern → question → description`
+  的优先级挑最像人话的字段；`question` 出现即判定「等人工确认」→ 转橙并自动展开。
+- **上下文占用**用宿主自己的算法（`surfaceTokens / contextWindow`），
+  与 DSH 输入框下方那颗上下文环同源。
+- **子代理并发数** = 投影里「在飞的工具调用」∩「agent 类工具名」
+  （`subagent` / `send_message`）。事件流本身不含子代理信息，见下方数据来源。
 
 数据全部**只读**本地会话文件，不联网、不改 DSH 任何文件。
 
@@ -51,7 +69,7 @@ auxiliaryTopRightArea = (718, 804, 562, 28)
 3. **只圆底部两角**——底角半径折叠态 12pt、展开态 20pt。
 
 尺寸策略（`NotchMetrics`，全部由实测刘海推导）：
-折叠 208×50（= 刘海宽 + 26×2），展开 440×160（= 刘海高 + 132）。
+折叠 208×50（= 刘海宽 + 26×2），展开 440×176（= 刘海高 + 148）。
 文字一律从刘海高（28pt）之下开始——**刘海区域是物理挖孔，画在那里的像素永远看不见**。
 
 ## 交互：悬停与点击怎么实现的
@@ -83,6 +101,9 @@ cd swift
 ./build.sh              # 编译 + 打包 .build/DSHNotch.app
 ./build.sh preview      # 再离屏渲染形状预览图到 .build/preview/
 ./build.sh install      # 再安装到 /Applications 并启动
+./build.sh self-test    # 交互自检（注入合成 NSEvent）
+./build.sh proj-test    # 投影自检（真实缓存 + 事件流端到端）
+./build.sh probes       # 编译全部自检探针到 .build/probes/
 ```
 
 脚本内部等价于：
@@ -93,7 +114,7 @@ swiftc -O -sdk "$SDK" -target arm64-apple-macos13.0 -parse-as-library \
   -o .build/DSHNotch Sources/DSHNotch/Core/*.swift Sources/DSHNotch/UI/*.swift Sources/DSHNotch/App.swift
 ```
 
-## 自检（不靠肉眼的两条路径）
+## 自检（不靠肉眼的六条路径）
 
 ### 1. 离屏渲染形状预览
 
@@ -152,24 +173,106 @@ DSH_NOTCH_VERBOSE=1 ./.build/DSHNotch &     # 前台可看日志
 （本机 `AXIsProcessTrusted = false`），事件会被系统**静默丢弃**——
 探针打印「已合成点击」但宿主端毫无反应，看起来像应用坏了，其实是权限问题。
 
-## 数据来源
+### 5. 投影解析 + 事件流端到端
 
-读取 DSH 的会话事件流（零新增数据通道）：
+```bash
+./build.sh proj-test        # 或 ./.build/DSHNotch --self-test-projections
+```
+
+两条腿：
+
+- **合成 fixture** 精确断言每个字段（局部数据里字段可能恰好缺失，覆盖不到边界），
+  外加容错用例（空数据 / 非 JSON / 缺 record / `val` 为 null）。
+- **本机真实投影缓存** 8 个文件全部解析成功，并把最近 3 个会话的
+  事件流跑一遍游标，与**测试自己独立重算的期望值**对比：
+  本回合工具计数、当前轮次、step 是否可取得、子代理数是否为 0。
+  期望值不经过被测代码，所以能真正判出游标算错。
+
+同时打印投影相对事件流的滞后量（实测 0）。当前：**84 项断言全通过**。
+
+### 6. 像素采样（判断形状/布局是否溢出）
+
+```bash
+./build.sh probes
+./.build/probes/probe-pixels .build/preview/preview-expanded.png 0 20 60 130 210
+```
+
+直接量出每一行里「岛体黑底」与「光晕色」的水平范围。**目测 PNG 极易被
+图片缩放骗到**（本项目就发生过一次：判定「光晕溢出岛体」，程序采样后
+证明岛体精确位于 [420, 860] pt、两侧光晕各只外扩 5pt，完全是错觉）。
+
+## 数据来源（两个本地数据源）
+
+### A. 会话事件流 —— 「正在发生什么」
 
 ```
 ~/.dsh/sessions/<项目路径>/<session-id>/session.v4.jsonl.zstd
 ```
 
-事件结构（逆向 dsh 0.2.0-rc.2 确认）：
+zstd 压缩的 JSONL，每行一条事件。结构（逆向 dsh 0.2.0-rc.2 确认）：
 
 ```json
 { "type": "tool/call", "seq": 29, "time": 1791042626255,
-  "data": { "turn": 1, "callId": "call_…", "name": "bash",
+  "data": { "turn": 1, "step": 23, "callId": "call_…", "name": "bash",
             "arguments": "{\"command\":\"ls -la …\"}" } }
 ```
 
-注意 `arguments` 是**内嵌 JSON 的字符串**，需二次解析。解析逻辑与插件端
-`parseActivityFromEvents` 一一对应，游标按事件自带的 `seq` 单调推进。
+- `arguments` 是**内嵌 JSON 的字符串**，需二次解析。
+- `turn` / `step` 出现在 `step/start`、`tool/call`、`tool/result` 上，
+  当前进度直接取最近一条带这两个字段的事件。
+- 游标按事件自带的 `seq` 单调推进（与插件端 `parseActivityFromEvents` 同一套原则）。
+- **事件流里没有** token 用量、上下文占用、待办列表、模型名 —— 这些得另找。
+
+### B. 会话投影缓存 —— 「累计成了什么样」
+
+```
+~/.dsh/storages/session_projcache/sessions/<session-id>.json
+```
+
+这是 DSH 自己对事件流做折叠（fold）之后的状态快照，形如
+`{"version":7,"record":{"rows":{ "<key>":{"ver":N,"seq":M,"val":…} }}}`。
+磁盘上存的是**完整 fold state**（比它自己 UI 用的 wire view 更全），
+所以能拿到界面都不显示的字段：
+
+| row | 用途 | 备注 |
+|---|---|---|
+| `tokenUsage.totals` | 输出 / 未缓存输入 / 缓存命中 token | 累计值 |
+| `contextPressure` | `surfaceTokens` / `contextWindow` | 宿主那颗上下文环同源 |
+| `sessionStats` | `turns` / `steps` / `llmMs` / `toolMs` | 另有 `openStep`、`pendingCalls`（UI 不显示但很有用） |
+| `todos` | 待办清单与状态 | |
+| `modelSelection.lastUsed` | provider + 模型名 | |
+| `permissions.preset` | 权限预设 | |
+| `title` | DSH 自己总结的会话标题 | 比第一句 prompt 干净 |
+| `subagentCatalog` | 已派生的子代理目录 | 只有 `{id, createdAt, mode, label}`，**不含运行态** |
+
+**关键实证：投影与事件流完全同步。** 实测三个会话的 `proj.seq` 与
+`events.maxSeq` 逐一相等（滞后 0 个事件序号），所以它可以当实时数据源用：
+
+```
+session-6778327d  proj.seq=544  events.maxSeq=544
+session-a59ae858  proj.seq=88   events.maxSeq=88
+session-9a3fb65c  proj.seq=75   events.maxSeq=75
+```
+
+（注意 `row.seq` 是「该值最后一次变化」的序号，通常小于 `maxSeq` 属正常；
+这里比较的是所有 row 的最大 seq。）
+
+### 关于子代理并发数
+
+`app.asar` 里**不存在** `subagentsByParent` 这种快照字段，投影的
+`subagentCatalog` 也只记目录不含运行态。因此并发数是用两个源**相交**推出来的：
+
+```
+在飞的工具调用 = sessionStats.pendingCalls 的 callId 集合        （源 B）
+callId → 工具名 = 事件流里的 tool/call 事件                        （源 A）
+子代理并发数   = 在飞调用中工具名 ∈ {subagent, send_message} 的个数
+```
+
+工具名取自 `app.asar` 中 `tool.call.toolview` 注册的 slot key
+（`subagent` / `list_agents` / `send_message` / `interrupt_agent` / `job_*`），
+只取真正会拉起/驱动一个子代理的两个，避免把「查询列表」也算成并发。
+映射不到的 callId 会被忽略（宁可不显示，也不猜）——
+此时折叠态只显示通用「在飞工具数」。
 
 ## 常驻策略
 
@@ -204,7 +307,20 @@ DSH_NOTCH_VERBOSE=1 /Applications/DSHNotch.app/Contents/MacOS/DSHNotch
 ```
 
 输出屏幕度量、zstd 工具路径、命中的会话文件、解压字节数/行数/解码条数、
+投影关键指标（seq / turns / steps / 输出 token / 上下文 / 在飞调用 / 待办）、
 首帧状态、窗口几何自证。排查数据通路或定位问题时先看这个。
+
+典型首帧（真实运行输出）：
+
+```
+屏幕度量: 屏幕 1280×832@2x | 刘海 156×28 @(x=562,y=804) | 折叠 208×50 | 展开 440×176
+loadEvents: session.v4.jsonl.zstd 解压 161562 字节 / 90 行 → 解码成功 90 条
+projections: session-a59ae858….json seq=88 turns=3 steps=7 out=3161 ctx=6551/1000000
+首帧: 事件 90 条, seq 游标 88, 状态 done, 「任务已完成」
+```
+
+注意最后两行：`seq 游标 88` 与 `projections seq=88` 相等 —— 两个独立数据源同步，
+这是「投影可以当实时指标用」的现场证据。
 
 ## 踩坑记录
 
@@ -253,11 +369,36 @@ DSH_NOTCH_VERBOSE=1 /Applications/DSHNotch.app/Contents/MacOS/DSHNotch
 16. **合成 `CGEvent` 会被静默丢弃** —— 无辅助功能授权时
     `CGEvent.post(tap: .cghidEventTap)` 与 `postToPid` 都不生效，
     且 CLI 层面看不到任何报错。验证点击请直接 `NSWindow.sendEvent(NSEvent.mouseEvent(...))`。
+17. **同名变量跨层漏同步** —— `Activity.toolCount`（快照字段）与
+    `ActivityCursor.toolCount`（游标私有累计量）同名，`handle()` 里只自增了后者，
+    快照里的值**从头到尾没被写过** → HUD 的「工具调用」永远显示 0 次。
+    这个 bug 在旧版就存在，是补断言时才暴露的。
+    **教训：结构体快照与内部状态用同名属性时，必须有一个显式同步点。**
+18. **`turn`/`step` 只在 `step/start` 里取是漏的** —— `tool/call`、`tool/result`
+    的 `data` 同样带这两个字段。只认 `step/start` 会让进度徽标停在很久以前。
+    改成「任何带 `turn`/`step` 的事件都同步」，并由 `turn/start` 负责归零。
+19. **不要凭印象给数据源下结论** —— 我曾判定 `session_projcache` 「只有 UI 投影、
+    无实时运行状态、不适合做监控」，实测发现它带 `sessionStats` / `contextPressure` /
+    `tokenUsage` / `pendingCalls`，且 `seq` 与事件流**逐一对齐（滞后 0）**。
+    一个反例：`app.asar` 里根本搜不到 `subagentsByParent`，而我一直以为那是宿主 API。
+20. **子代理并发数没有现成字段可读** —— 事件流不含子代理信息；投影
+    `subagentCatalog` 只记 `{id, createdAt, mode, label}`（无运行态）；
+    `subagent` row 只在「本会话自己是子代理」时才有值。
+    最终用 `sessionStats.pendingCalls`（在飞 callId）∩ 事件流里的
+    `callId → 工具名` 映射推出，映射不到就不显示 —— **宁可不显示，也不猜**。
 
 ## 已知限制
 
 - 事件文件是 DSH 写完才落盘的，**写入过程中该行可能不完整**（解码自然跳过）。
 - 只读「最近修改的会话文件」，同时开多个会话时只跟随最新那个。
+- **上下文占用**取自投影的 `surfaceTokens / contextWindow`，是 DSH 自己的估算
+  （它同时还有 `sampledSurfaceTokens`，两者略有差异），当参考值用。
+- **子代理并发数是推断值**：靠「在飞的工具调用」∩「agent 类工具名」得出。
+  工具改名或事件流还没读到对应 `tool/call` 时就退化为只显示「在飞工具数」，
+  不会瞎报。
+- **投影缓存缺失时自动降级**：读不到 `session_projcache` 就只展示事件流
+  能给的字段（动作、工具名、耗时、轮次步数），token / 上下文 / 待办不显示。
+  两个数据源都是只读，任何一侧失败都不会影响另一侧。
 - 无硬件刘海的屏会退化为屏幕顶部悬浮药丸（`NotchMetrics` 已做回退，
   但样式未针对无刘海屏调优）。
 - 折叠态胶囊比刘海宽 52pt，会盖住刘海两侧各 26pt 的菜单栏空白区；

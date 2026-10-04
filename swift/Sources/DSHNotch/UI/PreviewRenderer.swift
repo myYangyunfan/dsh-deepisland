@@ -16,19 +16,39 @@ enum PreviewRenderer {
         let dirURL = URL(fileURLWithPath: dir)
         try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
 
+        let now = Date().timeIntervalSince1970 * 1000
         let cases: [(String, Activity, Bool)] = [
             ("preview-compact-tool.png",
-             Activity(status: .tool, title: "执行 bash", detail: "ls -la ~/.dsh/sessions | head -20",
-                      currentTool: "bash", toolCount: 7, isWaitingApproval: false,
-                      turnStartTime: Date().timeIntervalSince1970 * 1000 - 34_000), false),
+             sample(status: .tool, title: "执行 bash", detail: "ls -la ~/.dsh/sessions | head -20",
+                    tool: "bash", toolCount: 7, elapsedMs: 34_000, now: now,
+                    proj: richProjections(contextUsed: 77_628)), false),
             ("preview-compact-waiting.png",
-             Activity(status: .waiting, title: "等待人工确认", detail: "提问: 是否覆盖写回文件？",
-                      currentTool: "ask", toolCount: 3, isWaitingApproval: true,
-                      turnStartTime: Date().timeIntervalSince1970 * 1000 - 128_000), false),
+             sample(status: .waiting, title: "等待人工确认", detail: "提问: 是否覆盖写回文件？",
+                    tool: "ask", toolCount: 3, elapsedMs: 128_000, now: now,
+                    proj: richProjections(contextUsed: 168_000), waiting: true), false),
+            ("preview-compact-done.png",
+             sample(status: .done, title: "任务已完成", detail: "调用 7 次工具",
+                    tool: nil, toolCount: 7, elapsedMs: 96_000, now: now,
+                    proj: richProjections(contextUsed: 77_628,
+                                          todos: [("调研开源项目", "completed"),
+                                                  ("设计技术蓝图", "in_progress"),
+                                                  ("写文档", "pending")],
+                                          pending: [])), false),
             ("preview-expanded.png",
-             Activity(status: .tool, title: "执行 edit", detail: "swift/Sources/DSHNotch/UI/NotchShape.swift",
-                      currentTool: "edit", toolCount: 12, isWaitingApproval: false,
-                      turnStartTime: Date().timeIntervalSince1970 * 1000 - 96_000), true),
+             sample(status: .tool, title: "执行 edit", detail: "swift/Sources/DSHNotch/UI/NotchShape.swift",
+                    tool: "edit", toolCount: 12, elapsedMs: 96_000, now: now,
+                    proj: richProjections(contextUsed: 77_628,
+                                          todos: [("调研开源项目", "completed"),
+                                                  ("设计技术蓝图", "in_progress"),
+                                                  ("写文档", "pending")],
+                                          pending: ["call_a", "call_b"]),
+                    agents: 1), true),
+            ("preview-expanded-alert.png",
+             sample(status: .tool, title: "执行 bash", detail: "npm run build --production && npm test",
+                    tool: "bash", toolCount: 23, elapsedMs: 372_000, now: now,
+                    proj: richProjections(contextUsed: 228_000,
+                                          pending: ["call_a", "call_b", "call_c", "call_d"]),
+                    agents: 2), true),
         ]
 
         for (name, activity, expanded) in cases {
@@ -40,17 +60,67 @@ enum PreviewRenderer {
             print("已输出 \(path)")
 
             // 再出一张 2 倍放大的中心裁切图 —— 形状细节在全屏图里看不清。
-            // 裁切高度要盖住整块岛（展开 160pt / 折叠 50pt），否则底部信息行会被切掉。
+            // 裁切高度要盖住整块岛（展开 176pt / 折叠 50pt），否则底部信息行会被切掉。
             let zoomName = name.replacingOccurrences(of: ".png", with: "-zoom.png")
             let zoomPath = dirURL.appendingPathComponent(zoomName).path
             let cropWidth: CGFloat = expanded ? 700 : 460
-            let cropHeight: CGFloat = expanded ? 190 : 110
+            let cropHeight: CGFloat = expanded ? 210 : 110
             let region = NSRect(x: metrics.screenFrame.midX - metrics.screenFrame.minX - cropWidth / 2,
                                 y: 0, width: cropWidth, height: cropHeight)
             if crop(from: rep, region: region, zoom: 2, canvasWidth: metrics.screenFrame.width, to: zoomPath) {
                 print("已输出 \(zoomPath)")
             }
         }
+    }
+
+    // MARK: - 预览数据
+
+    /// 组装一个带投影指标的示例 Activity。
+    private static func sample(status: ActivityStatus,
+                               title: String,
+                               detail: String,
+                               tool: String?,
+                               toolCount: Int,
+                               elapsedMs: Double,
+                               now: Double,
+                               proj: Projections,
+                               agents: Int = 0,
+                               waiting: Bool = false) -> Activity {
+        var a = Activity(status: status, title: title, detail: detail,
+                         currentTool: tool, toolCount: toolCount,
+                         isWaitingApproval: waiting, turnStartTime: now - elapsedMs)
+        a.turn = proj.turns
+        a.step = proj.steps
+        a.proj = proj
+        a.pendingTools = proj.pendingCallIds.count
+        a.pendingAgents = agents
+        return a
+    }
+
+    /// 造一份接近真实（见 `ProjectionSelfTest` 里的 fixture）的投影快照。
+    private static func richProjections(contextUsed: Int = 77_628,
+                                        todos: [(String, String)] = [],
+                                        pending: [String] = []) -> Projections {
+        var p = Projections()
+        p.seq = 544
+        p.outputTokens = 39_369
+        p.uncachedInputTokens = 2_106_768
+        p.cacheReadTokens = 1_704_232
+        p.contextUsed = contextUsed
+        p.contextWindow = 262_144
+        p.turns = 3
+        p.steps = 98
+        p.pendingCallIds = pending
+        p.provider = "itti"
+        p.modelName = "gemini-3.8-flash-high"
+        p.permissionPreset = "workspace-write"
+        p.title = "刘海屏智能体插件调研"
+        if !todos.isEmpty {
+            p.todoTotal = todos.count
+            p.todoDone = todos.filter { $0.1 == "completed" }.count
+            p.todoCurrent = (todos.first { $0.1 == "in_progress" } ?? todos.first { $0.1 == "pending" })?.0
+        }
+        return p
     }
 
     /// 从整屏渲染结果里裁一块并放大，便于肉眼核对圆角/对齐。

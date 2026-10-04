@@ -18,8 +18,12 @@ final class SessionSource {
     private let fm = FileManager.default
     /// 打开详细日志（诊断数据通路时用 DSH_NOTCH_VERBOSE=1）
     let verbose = ProcessInfo.processInfo.environment["DSH_NOTCH_VERBOSE"] != nil
-    private var cache: Cached?
+    /// 按路径缓存多份（自检要连读多个会话文件；App 平时只用最新那个）
+    private var caches: [String: Cached] = [:]
     private let decoder = JSONDecoder()
+    /// 「最新会话文件」的短时缓存：`tick()` 里要问两次（事件流 + 投影），
+    /// 而每次枚举整个 sessions 目录不便宜。1 秒内复用同一次结果。
+    private var latestCache: (url: URL?, at: Date)?
 
     init(dshRoot: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".dsh", isDirectory: true)) {
@@ -30,6 +34,13 @@ final class SessionSource {
 
     /// 最新的会话文件（按 mtime 排序取第一）。
     func latestSessionFile() -> URL? {
+        if let c = latestCache, Date().timeIntervalSince(c.at) < 1.0 { return c.url }
+        let found = scanLatestSessionFile()
+        latestCache = (found, Date())
+        return found
+    }
+
+    private func scanLatestSessionFile() -> URL? {
         let sessionsDir = dshRoot.appendingPathComponent("sessions", isDirectory: true)
         guard let walker = fm.enumerator(
             at: sessionsDir,
@@ -69,17 +80,24 @@ final class SessionSource {
             if verbose { NSLog("[dsh-notch] loadEvents: 找不到会话文件") }
             return []
         }
+        return loadEvents(from: file) ?? []
+    }
+
+    /// 读取**指定**会话文件的事件流（同样带缓存）。
+    ///
+    /// 与 `loadEvents()` 分开是为了自检能一次连读多个会话。
+    func loadEvents(from file: URL) -> [SessionEvent]? {
         guard let vals = try? file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
               let mtime = vals.contentModificationDate, let size = vals.fileSize else {
             if verbose { NSLog("[dsh-notch] loadEvents: 读不到文件属性 \(file.lastPathComponent)") }
-            return []
+            return nil
         }
 
-        if let c = cache, c.mtime == mtime, c.size == size { return c.events }
+        if let c = caches[file.path], c.mtime == mtime, c.size == size { return c.events }
 
         guard let raw = decompress(url: file) else {
             if verbose { NSLog("[dsh-notch] loadEvents: 解压失败 \(file.path) (zstd=\(Self.zstdToolPath ?? "nil"))") }
-            return []
+            return nil
         }
         let lines = raw.split(separator: "\n", omittingEmptySubsequences: true)
         let events = lines.compactMap { line -> SessionEvent? in
@@ -91,7 +109,7 @@ final class SessionSource {
                 NSLog("[dsh-notch]   首条: type=\(first.type) seq=\(first.seq ?? -1) name=\(first.data?.name ?? "-")")
             }
         }
-        cache = Cached(events: events, mtime: mtime, size: size)
+        caches[file.path] = Cached(events: events, mtime: mtime, size: size)
         return events
     }
 

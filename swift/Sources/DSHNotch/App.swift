@@ -34,6 +34,12 @@ enum DSHNotchMain {
             exit(test.run() ? 0 : 1)
         }
 
+        // 自检模式：在真实投影缓存上验证解析与合并（不启动 UI）
+        if CommandLine.arguments.contains("--self-test-projections") {
+            let test = ProjectionSelfTest()
+            exit(test.run() ? 0 : 1)
+        }
+
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -51,6 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 指针轮询（高频，只读鼠标位置，不碰文件）
     private var pointerTimer: Timer?
     private let source = SessionSource()
+    /// 会话投影缓存（token / 上下文 / 待办 / 模型 —— 事件流里没有的结构化指标）
+    private let projections = ProjectionCache()
     private var cursor = ActivityCursor()
     private let state = NotchViewState()
     private let metrics = NotchMetrics.current()
@@ -242,17 +250,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         · 鼠标移到刘海上 → 展开成大面板（看一眼就够，不用点）
         · 移开鼠标 0.35 秒 → 自动收起
-        · 面板里的 ✕ → 取消钉住；菜单栏「钉住展开 HUD」→ 一直展开
+        · 在岛上点一下 → 钉住常驻展开，再点一下取消
         · 等待人工确认时（状态变橙）会自动展开提醒你
-        · 状态色：灰=待命 蓝=思考 青=执行工具 橙=等你确认
+        · 任务跑完会保持绿色「任务已完成」几秒，再自动收起
+        · 状态色：灰=待命 蓝=思考 青=执行工具 橙=等你确认 绿=已完成
 
-        展开面板内容：状态角标 / 当前任务 / 工具参数摘要 / 耗时 / 工具调用次数。
+        折叠态显示：状态点 / 当前动作 / 工具名（或子代理数）/ 耗时。
+        上下文吃紧（>50%）时会额外亮出占用百分比，过半转琥珀、超 80% 转红。
+
+        展开态显示：状态角标、当前任务、轮次与步数（T3·S98）、工具参数正文、
+        待办进度与当前待办项、耗时、工具调用次数、输出 token 数、
+        上下文占用百分比、在飞的工具/子代理数、模型名与权限预设。
 
         菜单栏波形图标里还有：悬停展开开关、空闲自动收起、开机自启、
         定位会话文件、导出形状预览图、退出。
 
-        会话数据来自 ~/.dsh/sessions（zstd 解压后增量读取），
-        只读，不上传，不修改任何 DSH 文件。
+        数据来自 ~/.dsh/sessions（事件流，zstd 解压后增量读取）与
+        ~/.dsh/storages/session_projcache（DSH 自己的状态投影，
+        提供 token / 上下文 / 待办等事件流里没有的指标）。
+        全程只读，不上传，不修改任何 DSH 文件。
         """
         NSApp.activate(ignoringOtherApps: true)
         alert.addButton(withTitle: "知道了")
@@ -451,7 +467,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func tick() {
         let events = source.loadEvents()
         let now = Date().timeIntervalSince1970 * 1000
-        let activity = cursor.apply(events, now: now)
+        // 投影缓存是可选的第二数据源：读不到就退化为纯事件流展示
+        let proj = source.latestSessionFile().flatMap { projections.load(for: $0) }
+        let activity = cursor.apply(events, now: now, projections: proj)
 
         // 状态驱动：只在真正变化时写入 @Published，避免打断动画
         state.now = now

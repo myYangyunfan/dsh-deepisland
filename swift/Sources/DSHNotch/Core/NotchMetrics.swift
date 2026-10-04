@@ -41,9 +41,12 @@ struct NotchMetrics {
     }
 
     /// 展开 HUD：更宽更高，同样顶端贴屏
+    ///
+    /// 高度 160 → 176：信息行从「耗时 / 工具调用」两格扩到「耗时 / 工具 / 输出 token /
+    /// 上下文占用」，另加一行模型信息与一条待办行，132pt 的内容带已放不下。
     var expandedSize: CGSize {
         let w = min(notchWidth + expandedWing * 2, screenFrame.width - 48)
-        return CGSize(width: max(w, compactSize.width), height: notchHeight + 132)
+        return CGSize(width: max(w, compactSize.width), height: notchHeight + 148)
     }
 
     /// 刘海下方那条用来显示文字的信息带高度

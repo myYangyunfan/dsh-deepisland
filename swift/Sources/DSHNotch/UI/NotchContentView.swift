@@ -33,7 +33,7 @@ struct NotchContentView: View {
         Color(red: status.glowRGB.r, green: status.glowRGB.g, blue: status.glowRGB.b)
     }
 
-    /// 刘海下方信息带的高度（折叠 22，展开 132）
+    /// 刘海下方信息带的高度
     private var contentHeight: CGFloat {
         let h = state.isExpanded ? metrics.expandedSize.height : metrics.compactSize.height
         return h - metrics.contentTopInset
@@ -71,7 +71,7 @@ struct NotchContentView: View {
     /// 内层光晕带的**绝对高度**。
     ///
     /// 早期实现让渐变铺满整个形状（相对高度），展开态 160pt 里上半部分全被
-    /// 青光淹没，文字对比度崩掉、剪影也糊了。改成固定 44pt：
+    /// 青光淹没，文字对比度崩掉、剪影也糊了。改成固定高度：
     /// 顶端那 28pt 本来就被物理挖孔吃掉，露在信息带里的只剩渐变的尾巴 —— 一抹极淡的色。
     private var glowBandHeight: CGFloat { state.isExpanded ? 48 : 34 }
 
@@ -103,6 +103,8 @@ struct NotchContentView: View {
 
     // MARK: - 折叠态（刘海下方一条信息带）
 
+    /// 折叠态空间只有 208pt，必须精打细算：只放「在干什么」+ 耗时，
+    /// 外加**最多一个仪表**（上下文告警优先，其次待办进度）。
     private var compactRow: some View {
         HStack(spacing: 7) {
             Circle()
@@ -115,19 +117,37 @@ struct NotchContentView: View {
                 .foregroundColor(Color(white: 0.94))
                 .lineLimit(1)
                 .truncationMode(.tail)
+                .minimumScaleFactor(0.85)
                 .layoutPriority(1)
 
             Spacer(minLength: 2)
 
-            if let tool = activity.currentTool {
+            // 子代理优先于普通工具名 —— 并发 agent 是更值得知道的事
+            if activity.pendingAgents > 0 {
+                badge(icon: "person.2.fill",
+                      text: "\(activity.pendingAgents)",
+                      tint: Color(red: 0.65, green: 0.78, blue: 1.0))
+            } else if let tool = activity.currentTool {
                 Text(tool)
-                    .font(.system(size: 9.5, design: .monospaced))
+                    .font(.system(size: 9, design: .monospaced))
                     .foregroundColor(Color(white: 0.8))
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1.5)
                     .background(Capsule().fill(Color.white.opacity(0.14)))
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
+            }
+
+            // 仪表位：上下文吃紧时优先报警，否则显示待办进度
+            if activity.contextLevel > 0, let ctx = activity.contextText {
+                Text(ctx)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(contextColor)
+                    .fixedSize()
+            } else if let todo = activity.todoText {
+                badge(icon: "checklist",
+                      text: todo,
+                      tint: Color(white: 0.62))
             }
 
             if activity.isActive, let t0 = activity.turnStartTime {
@@ -142,70 +162,189 @@ struct NotchContentView: View {
         .contentShape(Rectangle())
     }
 
-    // MARK: - 展开 HUD（刘海下方 132pt 面板）
+    private func badge(icon: String, text: String, tint: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon).font(.system(size: 8.5))
+            Text(text).font(.system(size: 9.5, design: .monospaced))
+        }
+        .foregroundColor(tint)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1.5)
+        .background(Capsule().fill(Color.white.opacity(0.10)))
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    /// 上下文占用色：常规灰白，过半转琥珀，超 80% 转红
+    private var contextColor: Color {
+        switch activity.contextLevel {
+        case 2: return Color(red: 0.89, green: 0.29, blue: 0.29)
+        case 1: return Color(red: 0.94, green: 0.62, blue: 0.15)
+        default: return Color(white: 0.7)
+        }
+    }
+
+    // MARK: - 展开 HUD
 
     private var expandedHUD: some View {
-        VStack(spacing: 7) {
-            HStack(spacing: 7) {
-                Circle().fill(glow).frame(width: 6, height: 6)
-
-                Text(status.badge.uppercased())
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .foregroundColor(glow)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(RoundedRectangle(cornerRadius: 4).fill(glow.opacity(0.18)))
-
-                Text(activity.title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(Color(white: 0.66))
-                    .lineLimit(1)
-
-                Spacer()
-
-                // 交互提示（点击整块岛体 = 钉住/取消钉住）
-                if state.pinned {
-                    Label("已钉住 · 点一下取消", systemImage: "pin.fill")
-                        .font(.system(size: 9.5))
-                        .foregroundColor(glow.opacity(0.9))
-                } else {
-                    Text("移开鼠标收起 · 点一下钉住")
-                        .font(.system(size: 9.5))
-                        .foregroundColor(Color(white: 0.34))
-                }
-            }
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5).offset(y: 4)
-            }
+        VStack(spacing: 6) {
+            headerRow
 
             Text(activity.detail)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(Color(red: 0.65, green: 0.84, blue: 1.0))
-                .lineLimit(3)
+                .lineLimit(activity.proj.hasTodo ? 2 : 3)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.07)))
 
+            todoRow
+
             Spacer(minLength: 0)
 
-            HStack(spacing: 12) {
-                statItem("耗时", elapsedText)
-                statItem("工具调用", activity.toolCountText)
-                if activity.isWaitingApproval { statItem("待确认", "是") }
-                Spacer()
-                Text("DSH Notch")
-                    .font(.system(size: 9))
-                    .foregroundColor(Color(white: 0.36))
-            }
-            .overlay(alignment: .top) {
-                Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5).offset(y: -4)
-            }
+            statsRow
+            metaRow
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    /// 首行：状态角标 + 标题 + 轮次 + 交互提示
+    private var headerRow: some View {
+        HStack(spacing: 7) {
+            Circle().fill(glow).frame(width: 6, height: 6)
+
+            Text(status.badge.uppercased())
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundColor(glow)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 4).fill(glow.opacity(0.18)))
+                .fixedSize()
+
+            Text(activity.title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Color(white: 0.66))
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            if let ts = activity.turnStepText {
+                Text(ts)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(Color(white: 0.52))
+                    .fixedSize()
+            }
+
+            if state.pinned {
+                Label("已钉住 · 点一下取消", systemImage: "pin.fill")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(glow.opacity(0.9))
+                    .fixedSize()
+            } else {
+                Text("移开鼠标收起 · 点一下钉住")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(Color(white: 0.34))
+                    .fixedSize()
+            }
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5).offset(y: 3)
+        }
+    }
+
+    /// 待办行：只在有 todo 时出现，显示当前项 + 进度
+    @ViewBuilder
+    private var todoRow: some View {
+        if activity.proj.hasTodo {
+            HStack(spacing: 6) {
+                Image(systemName: "checklist")
+                    .font(.system(size: 9))
+                    .foregroundColor(Color(white: 0.45))
+                if let cur = activity.proj.todoCurrent {
+                    Text(cur)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(Color(white: 0.7))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 4)
+                Text(activity.todoText ?? "")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(Color(white: 0.85))
+                    .fixedSize()
+            }
+        }
+    }
+
+    /// 统计行：耗时 / 工具调用 / 输出 token / 上下文占用 / 在飞调用
+    private var statsRow: some View {
+        HStack(spacing: 10) {
+            statItem("耗时", elapsedText)
+            statItem("工具", activity.toolCountText)
+
+            if let out = activity.proj.outputTokens {
+                statItem("输出", Projections.shortTokens(out) + " tok")
+            }
+            if let ctx = activity.contextText {
+                HStack(spacing: 3) {
+                    Text("上下文:").font(.system(size: 10)).foregroundColor(Color(white: 0.4))
+                    Text(ctx)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(contextColor)
+                }
+                .fixedSize()
+            }
+            if activity.pendingAgents > 0 {
+                HStack(spacing: 3) {
+                    Image(systemName: "person.2.fill").font(.system(size: 8.5))
+                    Text("\(activity.pendingAgents)")
+                        .font(.system(size: 10, design: .monospaced))
+                }
+                .foregroundColor(Color(red: 0.65, green: 0.78, blue: 1.0))
+                .fixedSize()
+            } else if activity.pendingTools > 0 {
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 8.5))
+                    Text("\(activity.pendingTools)")
+                        .font(.system(size: 10, design: .monospaced))
+                }
+                .foregroundColor(Color(white: 0.6))
+                .fixedSize()
+            }
+
+            Spacer(minLength: 2)
+        }
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5).offset(y: -3)
+        }
+    }
+
+    /// 末行：模型 / 权限，右侧署名
+    private var metaRow: some View {
+        HStack(spacing: 6) {
+            if let model = activity.proj.modelName {
+                Text(model)
+                    .font(.system(size: 9))
+                    .foregroundColor(Color(white: 0.42))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            if let perm = activity.proj.permissionPreset {
+                Text(perm)
+                    .font(.system(size: 9))
+                    .foregroundColor(Color(white: 0.30))
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            Spacer(minLength: 4)
+            Text("DSH Notch")
+                .font(.system(size: 9))
+                .foregroundColor(Color(white: 0.28))
+                .fixedSize()
+        }
     }
 
     private var elapsedText: String {
@@ -218,5 +357,6 @@ struct NotchContentView: View {
             Text(label + ":").font(.system(size: 10)).foregroundColor(Color(white: 0.4))
             Text(value).font(.system(size: 10, design: .monospaced)).foregroundColor(Color(white: 0.85))
         }
+        .fixedSize()
     }
 }
