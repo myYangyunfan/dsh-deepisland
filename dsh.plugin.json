@@ -1,6 +1,6 @@
 {
   "id": "dsh-vibe-island",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "main": "./lib/index.js",
   "description": "DeepSeek Harness 智能体刘海灵动岛：Mac/Win 双端兼容，实时显示 Agent 思考、工具执行与子代理状态的全局灵动岛状态栏",
   "engines": {

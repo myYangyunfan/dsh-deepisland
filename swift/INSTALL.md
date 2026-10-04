@@ -3,6 +3,18 @@
 这份说明面向「**要把 DSH Notch 装到自己 Mac 上**」的人。
 如果你是本仓库作者、机器上已经有源码，`./build.sh install` 一行就够，不用看这里。
 
+## 先看这条：如果你打算装 DSH 插件，那 app 不用你装
+
+装了仓库里的 DSH 插件（`git+https://github.com/myYangyunfan/dsh-deepisland.git`）之后，
+插件服务端会自己检查 `/Applications/DSHNotch.app`，缺就从本仓库 Release 下载、
+**校验 SHA256**、解压、装好并启动。所以下面的手动步骤**只在两种情况下需要**：
+
+- 你**不装插件**，只想用原生 app
+- 你想自己控制安装过程（或把 `autoInstallApp` 关了）
+
+插件自动安装的边界（只装缺失的、绝不覆盖已装的、只从本仓库 Release 下载并校验）见
+[`../README.md`](../README.md) 的「只装插件就够了」。
+
 ## 两条路，选一条
 
 | | 方式一：下载现成包 | 方式二：从源码编译 |
@@ -123,11 +135,32 @@ cd dsh-deepisland/swift
 
 打包过程会自己解压回来跑一遍自检，确认「别人拿到能用」这条路是通的。
 
-## 装完先关掉 DSH 窗口里那个岛
+## 装了插件会多出两个岛：留哪个？
 
-如果你**同时**装过 DSH 的 `dsh-vibe-island` 插件，会出现两个状态栏
-（DSH 窗口内中部一个 + 真实刘海一个），视觉冗余。
-只想要系统级这个的话，把插件从 bundle 列表里摘掉：
+装了 DSH 的 `dsh-vibe-island` 插件后，会出现两个状态栏
+（DSH 窗口内中部一个 + 真实刘海一个），视觉冗余。**但插件还负责两件 app 干不了的事**，
+所以摘掉它是有代价的：
+
+| | 留着插件 | 摘掉插件 |
+| :--- | :--- | :--- |
+| 刘海岛（系统级） | ✅ | ✅ |
+| 窗口内那个岛 | 也在（冗余） | 没了 |
+| **点对话直接切到该会话** | ✅ 一步到位 | ❌ 退回「置前 + 复制标题 + `⌘K` 粘贴」 |
+| 别人第一次装 | 插件自动装好 app | 要自己按上面走一遍 |
+
+想要「只留刘海岛，但仍然要一步跳转」，把插件的窗口内渲染关掉即可，
+不必摘掉整个插件 —— 在 `~/.dsh/profiles/desktop/cordis.patch.yml` 里：
+
+```yaml
+- id: vibe-island
+  name: '@dsh-external/dsh-vibe-island'
+  config:
+    enabled: false        # 只关窗口内那个岛；桥与自动安装仍照常工作
+```
+
+（`enabled: false` 关的是窗口内 DOM 层。服务端半边——桥和自动安装——不受这个开关影响。）
+
+真要整个摘掉插件：
 
 ```jsonc
 // ~/.dsh/profiles/desktop/package.json
@@ -144,6 +177,19 @@ cd dsh-deepisland/swift
 
 `dependencies` 里的依赖项可以留着不删（保留安装状态，随时能在插件管理里重新启用）。
 **改完要重启 DSH Desktop 才生效。**
+
+## 想知道跳转桥在不在？两处可查
+
+```bash
+# 1) 插件服务端有没有把桥端口写出来（写了就说明桥在跑）
+cat ~/Library/Application\ Support/DSHNotch/bridge.json
+
+# 2) 桥的协议说明（把 47311 换成上面文件里的 port）
+curl -s http://127.0.0.1:47311/health
+```
+
+DSH 启动日志里搜 `[dsh-vibe-island]` 也能看到 `bridge: 已就绪 …` 或
+`bridge: 未找到`（后者说明端口全被占，app 会自动走降级方案）。
 
 ## 怎么确认它真的在工作
 

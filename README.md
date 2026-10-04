@@ -55,6 +55,132 @@
 | 鼠标移到刘海上（停留约 0.2 秒） | 展开成面板（440 宽；高 176，多会话时按行数长到 235） |
 | 鼠标移开（超过 0.35 秒） | 自动收起 |
 | 在岛上点一下（折叠态，或展开态的非对话区） | 钉住常驻展开／再点一下取消 |
+| 展开态点某一行对话（单会话时点中间正文块） | **直接跳到 DSH 里的那个对话**（装了插件时；否则降级为置前 + 复制标题） |
+| 状态变橙（等待人工确认） | 自动展开提醒 |
+| 菜单栏波形图标 | 使用说明 / 钉住 / 悬停展开开关 / 空闲自动收起 / 开机自启 / 授予辅助功能权限（自动定位对话） / 定位会话文件 / 导出预览图 / 退出 |
+
+**同时跟随最多 6 个对话。** DSH 并行开多个会话时（本机实测同一分钟有两个在写文件），
+折叠态显示最该关注的那个 + 会话数徽标 `⚏ 2/3`，展开态每个对话各占一行，
+按「等人工确认 > 执行工具 > 思考 > 已完成 > 待命」排序——任一会话等人确认都会自动展开。
+
+---
+
+## 🔗 点一下对话就跳过去：插件桥
+
+点展开态里的某一行，DSH 会**直接切到那个会话**——不用搜、不用粘贴、不用按回车，
+也**不需要辅助功能权限**。
+
+### 为什么以前做不到
+
+DSH 对外只注册了一条深链 `dsh://open`，作用仅是把主窗口拉到前台：
+
+```js
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  if (url === "dsh://open" || url === "dsh://open/") focusPrimaryWindow();
+});
+```
+
+没有「打开第 N 个对话」的对外接口。所以上一版只能绕：置前 DSH + 把标题写进剪贴板，
+让你 `⌘K` 再 `⌘V`，有辅助功能权限时替你按完 ⌘K 和粘贴。
+
+### 桥是怎么搭起来的
+
+关键发现：**插件的渲染进程能打开会话，外部 app 不能。**
+宿主 asar 里 `ctx.uiWorkspace.openSession(target)` 有 9 处真实调用，官方注释写着
+「target 可以是已知的 Session id」。于是让插件的服务端半边在回环上起一个小 HTTP 服务，
+两端各接一半：
+
+```
+  点击 island row
+        │
+        ▼
+  ┌─────────────────────────┐         ┌──────────────────────────────────┐
+  │ DSHNotch.app (Swift)    │  POST   │ DSH 插件服务端  lib/index.js      │
+  │ SessionJump.postToBridge│ ──────► │ 127.0.0.1:47311  /jump          │
+  └─────────────────────────┘         │   队列（上限 32，45s 过期）      │
+        │                            └──────────────────────────────────┘
+        │ 读 bridge.json 拿端口                  ▲ 轮询 GET /next（500ms）
+        │                                      │
+        │                            ┌──────────────────────────────────┐
+        └──────────────────────────  │ DSH 插件客户端  lib/client.js    │
+                                     │ ctx.get("uiWorkspace")           │
+                                     │   .openSession(sessionId)        │
+                                     └──────────────────────────────────┘
+```
+
+会话 id 从会话文件里取（`{"type":"session","id":"session-<uuid>"}`，与目录名一致），
+正是 `openSession` 要的形态。
+
+### 为什么渲染进程能连本机 HTTP
+
+逐条查过宿主，不是想当然：
+
+- **主窗口没有 CSP。** asar 里 10 处 `Content-Security-Policy` 分属 API 文件服务
+  （`sandbox; default-src 'none'`）、HTML 预览消毒、更新/欢迎/强制更新弹窗，
+  没有一条管到 `dsh-app://app` 主界面。
+- Electron 启动参数含 `--disable-features=PrivateNetworkAccessChecks,
+  LocalNetworkAccessChecks`，本机网络访问的额外预检被关掉了。
+- 协议注册为 `--cors-schemes=dsh-app`，跨源走 CORS，所以桥的响应都带
+  `Access-Control-Allow-Origin: *`。
+
+### 桥坏了会怎样
+
+**降级，不影响灵动岛。** 桥只在 `127.0.0.1` 上、只服务同一个用户、只传 sessionId。
+用户没装插件、DSH 没开、插件版本旧 —— 全部退回「置前 + 复制标题 +（有权限则）⌘K ⌘V」，
+和在装桥之前完全一样。`/jump` 与 `/next` 的响应都回显插件名，
+免得 47311 附近有别的服务时被误认。
+
+想关掉：设置里 `bridgeEnabled: false`。
+
+### 🔴 两条不能碰的纪律
+
+1. **`uiWorkspace` 绝不能写进 `exports.inject`。** Cordis 会为缺失的服务无限等待，
+   插件永久停在 `pending (waiting for service: uiWorkspace)`，整个灵动岛直接消失。
+   本项目早前把不存在的 `settingsScope` 写进 inject 就踩过这个坑
+   （证据在 `~/Library/Logs/DeepSeek Harness/crash-*-web-boot.log`）。
+   现在一律用 `ctx.get("uiWorkspace")` 运行时探测，取不到就安静跳过这一跳。
+2. **`/next` 取队列前必须先 prune。** 少这一步，一条十分钟前的点击会在你下次
+   打开 DSH 时把你劫持到某个会话。队列项 45s 过期。
+
+---
+
+## 📥 只装插件就够了
+
+装了插件，**macOS 上的 DSHNotch.app 会自己装好**：
+
+1. 插件服务端在 `apply()` 时检查 `/Applications/DSHNotch.app`
+   （判据是主程序**和**自带的 zstdlite 都在——只看 `.app` 目录是不够的，
+   早期就出过「包在但读不到任何会话」的事故）
+2. 缺了就从本仓库 Release 下载 `DSHNotch-<版本>-<架构>.zip`
+   （直连优先，`gh-proxy.com` 镜像兜底）
+3. **校验 SHA256**，对不上就中止安装
+4. `ditto` 解压（保可执行位与代码签名，`unzip` 会丢）、清 quarantine
+5. 装进 `/Applications`（不可写则退 `~/Applications`）并启动
+
+### 请知情：它会下载并运行一个外部程序
+
+这是自动安装做不到完全无感的地方，明说在这：
+
+- 只从**本仓库的 Release** 下载，且**必须 SHA256 对得上**才会执行
+- **绝不覆盖已安装的版本。** 已装 → 一个字节都不动；装了但残缺 → 报 `broken` 并
+  让你自己处理，绝不悄悄替换
+- 只装缺失的，不做升级。**升级仍按 [`swift/INSTALL.md`](./swift/INSTALL.md) 手动来**
+- 每一步都打到 DSH 日志（搜 `[dsh-vibe-island]`）
+
+关掉：设置里 `autoInstallApp: false`，然后按 `swift/INSTALL.md` 手动装。
+
+---
+
+## 🧪 DSH Notch 怎么用（系统级那个）
+
+菜单栏出现波形图标即已就绪，刘海正中就是浮层：
+
+| 操作 | 结果 |
+| :--- | :--- |
+| 鼠标移到刘海上（停留约 0.2 秒） | 展开成面板（440 宽；高 176，多会话时按行数长到 235） |
+| 鼠标移开（超过 0.35 秒） | 自动收起 |
+| 在岛上点一下（折叠态，或展开态的非对话区） | 钉住常驻展开／再点一下取消 |
 | 展开态点某一行对话（单会话时点中间正文块） | 跳到 DSH 里的那个对话：DSH 置前 + 该会话标题进剪贴板 |
 | 状态变橙（等待人工确认） | 自动展开提醒 |
 | 菜单栏波形图标 | 使用说明 / 钉住 / 悬停展开开关 / 空闲自动收起 / 开机自启 / 授予辅助功能权限（自动定位对话） / 定位会话文件 / 导出预览图 / 退出 |
@@ -63,13 +189,11 @@
 折叠态显示最该关注的那个 + 会话数徽标 `⚏ 2/3`，展开态每个对话各占一行，
 按「等人工确认 > 执行工具 > 思考 > 已完成 > 待命」排序——任一会话等人确认都会自动展开。
 
-**点一下对话就跳过去。** 点展开态里的某一行 → DSH 被拉到前台，该会话标题进剪贴板，
-DSH 里按 `⌘K` 再 `⌘V` 即定位。授予「辅助功能」权限后，`⌘K` 与粘贴会自动完成。
-（DSH 只对外注册了 `dsh://open` 一条深链，没有「打开第 N 个对话」的接口，
-所以只能这么绕 —— 详见 [`swift/README.md`](./swift/README.md) 的「跳转到对话」。）
+**点一下对话就跳过去。** 见上面的「[🔗 点一下对话就跳过去：插件桥](#-点一下对话就跳过去插件桥)」。
 
 安装（**别人要装到自己机器上，看 [`swift/INSTALL.md`](./swift/INSTALL.md)** ——
-那里写了「下载现成包」和「从源码编译」两条路，含 Gatekeeper 放行）：
+那里写了「下载现成包」和「从源码编译」两条路，含 Gatekeeper 放行；
+**装了插件的话 app 会自动装好**，一般不用手动走）：
 
 ```bash
 cd swift
@@ -91,8 +215,8 @@ deepisland/
 ├── package.json             # 客户端注入与宿主共享模块声明
 ├── cordis.patch.yml         # DSH Cordis 插件栈自动挂载
 ├── lib/
-│   ├── index.js             # 服务端 Cordis 插件（热配置命名空间注册）
-│   └── client.js            # 客户端核心 Bundle（UI、CSS、事件扫描引擎、设置项）
+│   ├── index.js             # 服务端 Cordis 插件：配置注册 + 本机跳转桥 + app 自动安装
+│   └── client.js            # 客户端核心 Bundle（UI、CSS、事件扫描、桥客户端、设置项）
 ├── test/                    # 零依赖测试套件（Node 断言 + 真实浏览器渲染验证）
 └── README.md                # 插件使用与安装文档
 ```
@@ -100,11 +224,28 @@ deepisland/
 ### 测试
 
 ```bash
-node test/run.mjs all      # 112 项 Node 断言：状态机、挂载、游标性能、子代理聚合
-node test/render-verify.mjs # 33 项真实浏览器断言：计算样式、尺寸、双平台皮肤（产物在 test/.tmp/）
+node test/run.mjs all         # 235 项 Node 断言：状态机、挂载、游标性能、子代理、跳转桥两端
+node test/run.mjs installdl    # 18 项：要联网，真下载 Release 并验 SHA256（约 30s，不进 all）
+node test/render-verify.mjs   # 33 项真实浏览器断言：计算样式、尺寸、双平台皮肤（产物在 test/.tmp/）
 ```
 
+各套件与职责：
+
+| 套件 | 断言 | 覆盖 |
+| :--- | ---: | :--- |
+| `contract` | 36 | 宿主契约（配置命名空间、inject 纪律等） |
+| `parse` / `apply` / `subagent` | 101 | 事件流解析、挂载、子代理聚合 |
+| `bridge` | 60 | **服务端桥**：起停、CORS、队列语义、TTL、端口顺延、app 完整性判定 |
+| `bridgeclient` | 27 | **客户端桥**：端到端 `POST /jump → 轮询 → openSession`、降级、停用纪律 |
+| `installdl` | 18 | **自动安装**：不覆盖已装、残缺包不替换、真下载 + 校验 + 篡改检测（需联网） |
+
+跨语言那一段（Swift `URLSession` → Node 桥）由 `./swift/.build/DSHNotch --self-test-jump`
+在桥跑着时验证，会打印「投递调用正常返回（通=true）」。
+
 两套测试均不依赖任何 npm 包。Node 套件通过桩 `window.__ModuleLoader__` / `document` 拉起插件 factory 并灌入真实事件流；渲染套件用 CDP 驱动本机 Edge/Chrome，加载从 `lib/client.js` 抽取的真实 CSS，断言实际生效的计算样式。
+
+> 桥的两套测试用 `node:http` 而不是 `fetch` 发请求：作者本机的执行沙箱允许 listen 回环，
+> 但拦截 `fetch` 到 `127.0.0.1`。这**只影响测试环境**——桥的客户端在 DSH 渲染进程里用的是浏览器 fetch。
 
 ---
 
@@ -123,9 +264,35 @@ node test/render-verify.mjs # 33 项真实浏览器断言：计算样式、尺�
 
 2. 刷新 DeepSeek Harness 界面（或访问 `http://127.0.0.1:19387`），模块加载器将自动加载灵动岛。
 
-### 方式二：通过 DSH 插件包导入器导入
+### 方式二：通过 DSH 插件管理器安装
 
-将本文件夹压缩为 `dsh-vibe-island.zip`，在 DSH 的插件管理页面中直接选择「导入插件包」即可。
+DSH Desktop 内置插件管理器（`@deepseek-ai/dsh-client-ui-plugin-manager`，随 0.2.0-rc.2 提供），
+安装入口是**输入「包名或地址」**（pnpm 接受的写法都行），不是选择压缩包：
+
+```text
+git+https://github.com/myYangyunfan/dsh-deepisland.git
+```
+
+装完重启 DSH 生效。实测的三条限制：
+
+- **一次只能装一个** —— 对话框一次跑一条 pnpm 命令，第二个 spec 要等前一个完成
+- **没有版本选择器** —— 不列注册表版本、不提供升级；profile 装的插件**升级＝卸载后重装**
+- **不透明失败** —— 出错的行只显示失败，具体原因在 Host 日志里
+
+> 装到哪个 profile 要看 DSH 实际在跑哪个：插件宿主进程的启动参数里第 4 段就是
+> profile 路径（`ps -ax | grep dsh-desktop-host`）。本机是 `desktop`。
+
+### 装完就有的东西
+
+重启 DSH 之后，**不需要再装别的东西**：
+
+| 能力 | 由谁提供 |
+| :--- | :--- |
+| 窗口内灵动岛 | 插件客户端（`lib/client.js`） |
+| 点对话直接跳转 + 自动装 macOS app | 插件服务端（`lib/index.js`） |
+
+想让岛显示在**物理刘海**上而不是 DSH 窗口里，再看下一节装原生 app
+（不装插件的话，app 需要你手动装一次，见 [`swift/INSTALL.md`](./swift/INSTALL.md)）。
 
 ---
 
@@ -141,6 +308,21 @@ node test/render-verify.mjs # 33 项真实浏览器断言：计算样式、尺�
 | **呼吸光晕** | `glowEffect` | `true` | 是否在 Agent 思考与执行时开启流光光晕动效 |
 | **悬停展开** | `expandOnHover` | `true` | 鼠标悬停在胶囊上时自动展开 HUD 控制台 |
 | **缩放比例** | `scale` | `1.0` | 灵动岛尺寸缩放（范围 0.8 ~ 1.3） |
+| **跳转桥** | `bridgeEnabled` | `true` | 点岛上的对话直接切到该会话。关掉则退回「置前 + 复制标题 + ⌘K 粘贴」 |
+| **桥端口** | `bridgePort` | `47311` | 本机回环端口。被占用时自动向后顺延，实际端口写进 `bridge.json` |
+| **自动装 app** | `autoInstallApp` | `true` | macOS 上缺 `DSHNotch.app` 时自动下载校验并安装。**只装缺失的，不做升级** |
+| **安装目录** | `appInstallDir` | `/Applications` | 不可写时自动退到 `~/Applications` |
+| **子代理计数** | `showSubagentCount` | `true` | 有并行子代理时在岛体右侧显示微章计数 |
+
+配置写在 profile 的 `cordis.patch.yml` 里，形如：
+
+```yaml
+- id: vibe-island
+  name: '@dsh-external/dsh-vibe-island'
+  config:
+    bridgeEnabled: true
+    autoInstallApp: false   # 不想让插件自动装 app 就关掉
+```
 
 ---
 
@@ -150,3 +332,11 @@ node test/render-verify.mjs # 33 项真实浏览器断言：计算样式、尺�
 - **只追加扫描缓存**：按会话 id 保存事件流扫描游标（容量上限 64，超出自动回收），只增量处理最新发生的事件。解析开销与历史长度无关——实测 64000 条事件时每轮仅 0.0004ms，长会话下轮询占用主线程不到 0.1%。
 - **子代理零额外数据通道**：内核把子代理实现为独立会话，插件只读客户端已有的会话谱系快照，不新增任何后端请求。
 - **沙箱隔离样式**：所有 CSS 类名带有专用命名空间（`vibe-island-*`），不会对 DSH 主题样式产生冲突或污染。
+- **插件加载永不被打崩**：服务端 `apply()` 里注册配置、起桥、装 app 三件事各自独立 try/catch，
+  全部失败也只记一行日志。配置服务缺失、`register` 抛重复注册、运行环境没有 `node:http`
+  都有对应用例（见 `test-bridge.mjs` T8）。
+- **桥的暴露面极小**：只监听 `127.0.0.1`（不绑 `0.0.0.0`）、只服务同一用户、
+  只传 `sessionId` 与标题、队列上限 32 条且 45s 过期、响应回显插件名以防误认。
+- **下载即校验**：自动安装只在 SHA256 与 Release 发布的 `SHA256SUMS.txt` 一致时才执行，
+  且绝不覆盖已安装的版本。TLS 证书校验保持开启——这是「校验过再装」的前提，
+  不要为了跑通而关掉。

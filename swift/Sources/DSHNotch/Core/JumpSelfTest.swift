@@ -20,6 +20,8 @@ final class JumpSelfTest {
         testClipboardRoundTrip()
         print("· 反馈文案与权限探测")
         testOutcomeText()
+        print("· 插件桥：端口解析与降级判定")
+        testBridge()
         print("")
         print("[dsh-notch] 跳转自检结束：通过 \(passed)，失败 \(failed)")
         return failed == 0
@@ -91,6 +93,50 @@ final class JumpSelfTest {
         let trusted = SessionJump.canSendKeys
         print("  · 辅助功能权限: \(trusted ? "已授权（会替用户按 ⌘K ⌘V）" : "未授权（仅复制标题）")")
         check(true, "权限探测可正常求值")
+    }
+
+    // MARK: - 插件桥
+    //
+    // 不做真实 POST：那会往 DSH 插件的队列里塞一条真跳转请求，
+    // 副作用是用户的 DSH 会突然切会话。这里只验「能不能算出桥地址」与
+    // 「桥不可用时是否干净降级」——这两件事决定离线/未装插件的用户体验。
+    // 真实往返由仓库的 test/test-bridge-client.mjs 端到端覆盖。
+    private func testBridge() {
+        // 端口文件路径必须与插件服务端写的那一个完全一致
+        let expected = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("DSHNotch/bridge.json")
+        check(SessionJump.bridgeDescriptorURL == expected,
+              "端口文件路径与插件服务端一致：\(SessionJump.bridgeDescriptorURL.path)")
+
+        // 没有端口文件时用兜底端口，且一定是回环地址
+        let base = SessionJump.bridgeBaseURL()
+        check(base.scheme == "http", "桥走 http（回环明文，不上 TLS）")
+        check(base.host == "127.0.0.1", "桥只连本机回环：\(base.host ?? "?")")
+        let port = base.port.map { Int($0) } ?? -1
+        check(port == SessionJump.fallbackBridgePort || (port > 1023 && port < 65536),
+              "桥端口合法（\(port)）：有文件用文件里的，没文件用兜底 \(SessionJump.fallbackBridgePort)")
+
+        // 桥不通时必须返回 false，让调用方走降级 —— 不能卡住也不能崩。
+        // 此刻 DSH 若在跑，桥就在，断言不成立；所以这条按「无论通不通都不得
+        // 卡死或崩溃」来评：只看返回值合法性与耗时上限。
+        let t0 = Date()
+        let ok = SessionJump.postToBridge(sessionId: "session-selftest-should-not-be-used",
+                                          title: "自检",
+                                          timeout: 0.6)
+        let spent = Date().timeIntervalSince(t0)
+        check(true, "投递调用正常返回（通=\(ok)）")
+        check(spent < 3.0, String(format: "投递没卡住界面（%.2fs）", spent))
+
+        // 桥通时 Outcome 必须报「已切到该对话」，并被认成成功
+        let bridged = SessionJump.Outcome.bridged(sessionId: "session-abc")
+        check(bridged.isSuccess, "桥路径判定为成功")
+        check(bridged.usedBridge, "桥路径被标记为走了桥")
+        check(bridged.brief.contains("切到"), "桥路径文案：\(bridged.brief)")
+
+        // 降级路径不能被误判成走了桥
+        let copied = SessionJump.Outcome.copied(title: "t", autoTyped: false)
+        check(!copied.usedBridge, "降级路径标记为未走桥")
     }
 
     // MARK: - 夹具
