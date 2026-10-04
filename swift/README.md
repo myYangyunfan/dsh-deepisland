@@ -201,6 +201,35 @@ swiftc -O -sdk "$SDK" -target "$(uname -m)-apple-macos13.0" -parse-as-library \
   -o .build/DSHNotch Sources/DSHNotch/Core/*.swift Sources/DSHNotch/UI/*.swift Sources/DSHNotch/App.swift
 ```
 
+### 发布：由 CI 产出，不在这台机器上发
+
+作者本机网络对 `api.github.com` 是 **SNI 级阻断**，实测三连：
+
+| 检查 | 结果 |
+| :--- | :--- |
+| `dig api.github.com` | 被污染成 `199.59.148.9`（不是 GitHub 的 IP） |
+| `doh.pub` 拿真实 IP `20.205.243.168` 后直连 | 超时，0 字节 |
+| `github.com` | 正常 200 / 1.8s |
+
+所以 `gh release create` 在这里永远 502/超时，但 `git push` 一直好使 ——
+git 走的是另一条链路。于是发布改成**推 tag 触发 GitHub Actions**（runner 在境外）：
+
+```bash
+# 版本号在 swift/Resources/Info.plist 的 CFBundleShortVersionString
+git push origin main
+git tag -a v0.3.1 -m "DSH Notch 0.3.1" && git push origin v0.3.1   # 这一步触发发布
+```
+
+`.github/workflows/release.yml` 会在 `macos-14`（arm64）上编译打包、
+断言产物确实是 arm64、再用 `GITHUB_TOKEN` 建 release 并附上 zip 与 `SHA256SUMS.txt`。
+也可到 Actions 页手动触发（`workflow_dispatch`，填要发布的 tag）。
+
+CI 上没有登录图形会话，所以 `build.sh package` 里「运行自检」那一项会被
+`DSHNOTCH_SKIP_SELFTEST=1` 跳过；「zstdlite 已随包」「代码签名完好」两项照跑。
+
+> 发完之后自己若要装同一版本，别用 `releases/download` 直链 —— 国内实测返回 404，
+> 用 [`INSTALL.md`](./INSTALL.md) 里给的镜像前缀下载。
+
 ## 自检（不靠肉眼的七条路径）
 
 ### 1. 离屏渲染形状预览

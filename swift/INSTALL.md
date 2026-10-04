@@ -30,13 +30,28 @@
 
 ## 方式一：下载现成包
 
-> 注：如果 Releases 页上**还没有**这个版本的包，说明还没发布 —— 走下面的方式二，
-> 或者直接找给你这份说明的人要 zip。
-
 1. 打开 Releases 页：<https://github.com/myYangyunfan/dsh-deepisland/releases>
 2. 把这两个文件下到同一个目录（比如「下载」）：
    - `DSHNotch-0.3.0-arm64.zip`
    - `SHA256SUMS.txt`
+
+> **国内网络必看**：`github.com/.../releases/download/...` 走的是另一套 CDN 域名，
+> 不少网络下**页面能打开、包却下不动**（作者本机实测：直连返回 404）。
+> 遇到就在原地址前面拼一个镜像前缀，下到的字节完全一样：
+>
+> ```bash
+> cd ~/Downloads
+> B='https://gh-proxy.com/https://github.com/myYangyunfan/dsh-deepisland/releases/download/v0.3.0'
+> curl -L -o DSHNotch-0.3.0-arm64.zip "$B/DSHNotch-0.3.0-arm64.zip"
+> curl -L -o SHA256SUMS.txt           "$B/SHA256SUMS.txt"
+> ```
+>
+> 换 `gh-proxy.com` 为 `ghproxy.net` / `ghfast.top` 亦可，都是同一类加速前缀。
+> 下一步的 SHA256 校验照做 —— 对得上就说明拿到的和官方发布的**一模一样**。
+
+> 注：若 Releases 页上还没有你要的版本（例如刚打完 tag、CI 还在跑），
+> 走下面的方式二，或直接找给你这份说明的人要 zip。
+
 3. **核对完整性**（别跳过，尤其从别人转发来的包）：
    ```bash
    cd ~/Downloads
