@@ -1,12 +1,28 @@
 import Foundation
 
-/// 会话数据源：定位 `~/.dsh/sessions/**/session.v4.jsonl.zstd` 中最新的活跃会话，
-/// 解压并解码为 `[SessionEvent]`。
+/// 一个候选会话文件及其元信息。
+///
+/// DSH 的目录布局：
+/// ```
+/// ~/.dsh/sessions/<项目目录名>/<会话目录名>/session.v4.jsonl.zstd
+///     --Users-delinger-Desktop-office--   session-a59ae858-…
+/// ```
+struct SessionFileInfo: Equatable {
+    /// 会话 id（= 会话目录名，如 `session-a59ae858-…`）。同时是投影缓存的查找键。
+    let id: String
+    /// 项目目录名（如 `--Users-delinger-Desktop-office--`）
+    let project: String
+    let url: URL
+    let mtime: Date
+}
+
+/// 会话数据源：发现 `~/.dsh/sessions/**/session.v4.jsonl.zstd`，解压并解码为 `[SessionEvent]`。
 ///
 /// 设计要点：
+/// - **多会话**：DSH 可以同时开多个对话（本机实测同一分钟内有两个会话在写）。
+///   这里提供 `sessionFiles()` 一次性给出全部候选，由 `SessionMonitor` 逐会话维护游标。
 /// - **增量**：以文件 `mtime` + 大小做缓存，未变化则直接返回上次结果，避免重复解压。
-/// - **活跃判定**：优先选 mtime 最近的会话；且要求 DSH 进程在跑（否则退化为 idle）。
-/// - **容错**：任何单次读取失败都降级为空数组，App 不会崩。
+/// - **容错**：任何单次读取失败都降级为空数组/空字典，App 不会崩。
 final class SessionSource {
     private struct Cached {
         let events: [SessionEvent]
@@ -21,9 +37,10 @@ final class SessionSource {
     /// 按路径缓存多份（自检要连读多个会话文件；App 平时只用最新那个）
     private var caches: [String: Cached] = [:]
     private let decoder = JSONDecoder()
-    /// 「最新会话文件」的短时缓存：`tick()` 里要问两次（事件流 + 投影），
-    /// 而每次枚举整个 sessions 目录不便宜。1 秒内复用同一次结果。
-    private var latestCache: (url: URL?, at: Date)?
+    /// 候选会话列表的短时缓存：`tick()` 里要问两次（事件流 + 投影），
+    /// 而每次枚举整个 sessions 目录（+ stat 每个文件）不便宜。1 秒内复用同一次结果。
+    /// 键包含**窗口长度** —— 自检会用更大的窗口重问一次，不区分就会拿到错的缓存。
+    private var filesCache: (files: [SessionFileInfo], at: Date, limit: Int, window: TimeInterval)?
 
     init(dshRoot: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".dsh", isDirectory: true)) {
@@ -32,44 +49,73 @@ final class SessionSource {
 
     // MARK: - 会话发现
 
-    /// 最新的会话文件（按 mtime 排序取第一）。
-    func latestSessionFile() -> URL? {
-        if let c = latestCache, Date().timeIntervalSince(c.at) < 1.0 { return c.url }
-        let found = scanLatestSessionFile()
-        latestCache = (found, Date())
-        return found
+    /// 同时监控的会话数上限。超过就只取 mtime 最新的几个。
+    static let maxSessions = 6
+
+    /// 「活跃」窗口：最近这个时间内有写入的会话才进候选。
+    ///
+    /// 窗口存在的意义：DSH 会把历史会话长期留在磁盘上（本机有 9 个，最早的
+    /// 是几天前），全量纳入会让岛变成「一堆早就结束的对话」的列表。
+    /// 30 分钟足够覆盖「同时开着的几个对话」——在跑的那个会不断写文件，
+    /// 暂停的也不会立刻掉出窗口。
+    static let activeWindow: TimeInterval = 30 * 60
+
+    /// 候选会话文件（按 mtime 倒序，最多 `maxCount` 个）。
+    ///
+    /// 若活跃窗口内一个都没有（刚开机、DSH 还没开始干活），退化为**全量最新的
+    /// 1 个** —— 岛仍然有东西可显示，而不是空白。
+    func sessionFiles(maxCount: Int = SessionSource.maxSessions,
+                      activeWithin: TimeInterval = SessionSource.activeWindow) -> [SessionFileInfo] {
+        if let c = filesCache, c.limit == maxCount, c.window == activeWithin,
+           Date().timeIntervalSince(c.at) < 1.0 {
+            return c.files
+        }
+        let all = scanAllSessionFiles()
+        let cutoff = Date().addingTimeInterval(-activeWithin)
+        var recent = all.filter { $0.mtime >= cutoff }.sorted { $0.mtime > $1.mtime }
+        if recent.isEmpty { recent = Array(all.sorted { $0.mtime > $1.mtime }.prefix(1)) }
+        let out = Array(recent.prefix(maxCount))
+        filesCache = (out, Date(), maxCount, activeWithin)
+        return out
     }
 
-    private func scanLatestSessionFile() -> URL? {
+    /// 最新的单个会话文件（投影查找、菜单「在 Finder 中显示」等单目标场景用）。
+    func latestSessionFile() -> URL? {
+        sessionFiles(maxCount: 1).first?.url
+    }
+
+    private func scanAllSessionFiles() -> [SessionFileInfo] {
         let sessionsDir = dshRoot.appendingPathComponent("sessions", isDirectory: true)
         guard let walker = fm.enumerator(
             at: sessionsDir,
             includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
             options: [.skipsHiddenFiles]
-        ) else { return nil }
+        ) else { return [] }
 
-        var best: (url: URL, date: Date)?
+        var out: [SessionFileInfo] = []
         for case let url as URL in walker where url.lastPathComponent == "session.v4.jsonl.zstd" {
             guard let vals = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
                   let d = vals.contentModificationDate else { continue }
-            if best == nil || d > best!.date { best = (url, d) }
+            let sessionDir = url.deletingLastPathComponent()
+            out.append(SessionFileInfo(id: sessionDir.lastPathComponent,
+                                       project: sessionDir.deletingLastPathComponent().lastPathComponent,
+                                       url: url,
+                                       mtime: d))
         }
-        return best?.url
+        return out
     }
 
-    /// DSH 是否在运行。用于「只在 DSH 有活动时显示」的常驻策略。
-    func isDSHRunning() -> Bool {
-        // 端口 19387 是 DSH 的 web 服务；监听即视为在运行
-        return portOpen(port: 19387)
-    }
-
-    private func portOpen(port: UInt16) -> Bool {
-        // 避免引入 Network 框架依赖，用 /dev/tcp 不可移植 → 走 sysctl 判进程更稳。
-        // 这里退化为「最近有会话文件被写过」作为近似信号。
-        guard let f = latestSessionFile(),
-              let vals = try? f.resourceValues(forKeys: [.contentModificationDateKey]),
-              let d = vals.contentModificationDate else { return false }
-        return Date().timeIntervalSince(d) < 60 * 30 // 30 分钟内有写入视为活跃
+    /// 把 DSH 的项目目录名还原成人看得懂的名字（**兜底**用）。
+    ///
+    /// `--Users-delinger-Desktop-deepisland--` → `deepisland`
+    /// 规则：去掉首尾的连字符（DSH 用 `--` 包裹路径），再把 `-` 当分隔符取最后一段。
+    /// 首选仍然是投影缓存里 DSH 自己总结的会话标题（`Projections.title`）。
+    static func prettyProject(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        guard !trimmed.isEmpty else { return nil }
+        let parts = trimmed.split(separator: "-")
+        guard let last = parts.last, last.count >= 2 else { return nil }
+        return String(last)
     }
 
     // MARK: - 读取

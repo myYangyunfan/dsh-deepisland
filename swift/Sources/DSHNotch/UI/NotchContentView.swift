@@ -6,14 +6,24 @@ import SwiftUI
 /// 早期实现每 250ms 重建一次 NSHostingView，展开动画刚起步就被打断，
 /// 而且每次重建都会丢掉 SwiftUI 的过渡状态。
 final class NotchViewState: ObservableObject {
-    /// 当前活动快照
+    /// 当前活动快照（= 主会话，折叠态与单会话展开态直接用这个）
     @Published var activity: Activity = .idle
+
+    /// 全部被监控的会话（按关注度排序，第一个是主会话）。
+    ///
+    /// DSH 可以同时开多个对话，只显示一个等于丢信息。视图按 `count > 1`
+    /// 在「单会话丰富布局」与「多会话列表布局」之间切换。
+    @Published var sessions: [SessionEntry] = []
+
     /// 当前是否渲染为展开 HUD（= 用户钉住 或 正在等待确认）
     @Published var isExpanded = false
     /// 用户手动钉住展开态
     @Published var pinned = false
     /// 当前时间（毫秒），每 tick 更新，让耗时分秒能自己走字
     @Published var now: Double = Date().timeIntervalSince1970 * 1000
+
+    /// 主会话 id（列表排序第一的那个；无会话时为 nil）
+    var primaryId: String? { sessions.first?.id }
 }
 
 /// 灵动岛内容视图。
@@ -33,15 +43,18 @@ struct NotchContentView: View {
         Color(red: status.glowRGB.r, green: status.glowRGB.g, blue: status.glowRGB.b)
     }
 
-    /// 刘海下方信息带的高度
-    private var contentHeight: CGFloat {
-        let h = state.isExpanded ? metrics.expandedSize.height : metrics.compactSize.height
-        return h - metrics.contentTopInset
+    /// 当前应渲染的形状尺寸。展开态高度**随会话数变化**（多会话要列出来）。
+    private var islandSize: CGSize {
+        metrics.islandSize(expanded: state.isExpanded, sessionRows: state.sessions.count)
     }
 
-    private var islandWidth: CGFloat {
-        (state.isExpanded ? metrics.expandedSize : metrics.compactSize).width
-    }
+    /// 刘海下方信息带的高度
+    private var contentHeight: CGFloat { islandSize.height - metrics.contentTopInset }
+
+    private var islandWidth: CGFloat { islandSize.width }
+
+    /// 是否渲染为多会话列表布局
+    private var isMultiSession: Bool { state.sessions.count > 1 }
 
     private var cornerRadius: CGFloat { state.isExpanded ? 20 : 12 }
 
@@ -122,8 +135,16 @@ struct NotchContentView: View {
 
             Spacer(minLength: 2)
 
-            // 子代理优先于普通工具名 —— 并发 agent 是更值得知道的事
-            if activity.pendingAgents > 0 {
+            // 多会话时这个位置让给「会话数」徽标 —— 208pt 宽放不下「工具名 + 会话数」
+            // 两样，而「还有几个对话在跑」是折叠态里别处看不到的信息
+            //（当前在干什么已经由左边的主会话标题表达了）。
+            if isMultiSession {
+                badge(icon: "rectangle.stack.fill",
+                      text: liveCountText,
+                      tint: hasWaitingSession
+                          ? Color(red: 1.0, green: 0.67, blue: 0.0)
+                          : Color(white: 0.72))
+            } else if activity.pendingAgents > 0 {
                 badge(icon: "person.2.fill",
                       text: "\(activity.pendingAgents)",
                       tint: Color(red: 0.65, green: 0.78, blue: 1.0))
@@ -138,16 +159,20 @@ struct NotchContentView: View {
                     .fixedSize(horizontal: true, vertical: false)
             }
 
-            // 仪表位：上下文吃紧时优先报警，否则显示待办进度
-            if activity.contextLevel > 0, let ctx = activity.contextText {
-                Text(ctx)
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundColor(contextColor)
-                    .fixedSize()
-            } else if let todo = activity.todoText {
-                badge(icon: "checklist",
-                      text: todo,
-                      tint: Color(white: 0.62))
+            // 仪表位（上下文告警 / 待办进度）：**只在单会话时**出现。
+            // 多会话时这个位置已经给了会话数徽标，208pt 装不下四样东西，
+            // 硬塞会把标题挤到只剩「等待人工…」这种读不出信息的程度。
+            if !isMultiSession {
+                if activity.contextLevel > 0, let ctx = activity.contextText {
+                    Text(ctx)
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundColor(contextColor)
+                        .fixedSize()
+                } else if let todo = activity.todoText {
+                    badge(icon: "checklist",
+                          text: todo,
+                          tint: Color(white: 0.62))
+                }
             }
 
             if activity.isActive, let t0 = activity.turnStartTime {
@@ -160,6 +185,23 @@ struct NotchContentView: View {
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .contentShape(Rectangle())
+    }
+
+    /// 折叠态会话数徽标：`2/3`（2 个在跑 / 共 3 个监控）；都没在跑就只给总数
+    private var liveCountText: String {
+        let live = state.sessions.filter { $0.isLive }.count
+        let total = state.sessions.count
+        return live > 0 ? "\(live)/\(total)" : "\(total)"
+    }
+
+    /// 是否任一会话在等人工确认（折叠态徽标转橙，且 App 层会强制展开）
+    private var hasWaitingSession: Bool {
+        state.sessions.contains { $0.activity.isWaitingApproval }
+    }
+
+    /// 状态 → 颜色。每个会话行用**自己**状态的颜色，而不是主会话的。
+    private func color(for status: ActivityStatus) -> Color {
+        Color(red: status.glowRGB.r, green: status.glowRGB.g, blue: status.glowRGB.b)
     }
 
     private func badge(icon: String, text: String, tint: Color) -> some View {
@@ -186,6 +228,13 @@ struct NotchContentView: View {
     // MARK: - 展开 HUD
 
     private var expandedHUD: some View {
+        Group {
+            if isMultiSession { multiSessionHUD } else { singleSessionHUD }
+        }
+    }
+
+    /// 单会话：保留原来的丰富布局（详情正文块 + 待办行 + 统计 + 模型行）
+    private var singleSessionHUD: some View {
         VStack(spacing: 6) {
             headerRow
 
@@ -209,6 +258,122 @@ struct NotchContentView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    // MARK: - 多会话展开布局
+
+    /// 多会话：一屏列出**每个对话**的状态，一行一个。
+    ///
+    /// 取舍：多会话时砍掉单会话那套「工具参数正文块 + 待办行」——
+    /// 详情只属于某一个会话，铺在全局位置会让人误以为是共同的；
+    /// 而「每行一个对话，各自什么状态」才是多会话时真正要看的东西。
+    /// 主会话（排序第一）那行加底色高亮，统计行也显示它的指标。
+    private var multiSessionHUD: some View {
+        VStack(spacing: 6) {
+            multiHeader
+
+            VStack(spacing: NotchMetrics.sessionRowGap) {
+                ForEach(state.sessions.prefix(NotchMetrics.maxSessionRows)) { s in
+                    sessionRow(s)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            statsRow
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    /// 多会话首行：主会话状态角标 + 会话数 + 交互提示
+    private var multiHeader: some View {
+        HStack(spacing: 7) {
+            Circle().fill(glow).frame(width: 6, height: 6)
+
+            Text(status.badge.uppercased())
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundColor(glow)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 4).fill(glow.opacity(0.18)))
+                .fixedSize()
+
+            Text("\(state.sessions.count) 个会话")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Color(white: 0.66))
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            if state.pinned {
+                Label("已钉住 · 点一下取消", systemImage: "pin.fill")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(glow.opacity(0.9))
+                    .fixedSize()
+            } else {
+                Text("移开鼠标收起 · 点一下钉住")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(Color(white: 0.34))
+                    .fixedSize()
+            }
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5).offset(y: 3)
+        }
+    }
+
+    /// 列表里的一行会话：状态点 / 名字 / 当前动作 / 短标签 / 耗时
+    private func sessionRow(_ s: SessionEntry) -> some View {
+        let c = color(for: s.activity.status)
+        let isPrimary = s.id == state.primaryId
+        return HStack(spacing: 7) {
+            Circle()
+                .fill(c)
+                .frame(width: 6, height: 6)
+                .shadow(color: s.isLive ? c.opacity(0.9) : .clear, radius: 4)
+
+            // 定宽，让右侧的标签/耗时在多个会话行之间对齐
+            Text(s.label)
+                .font(.system(size: 10.5, weight: isPrimary ? .semibold : .regular))
+                .foregroundColor(Color(white: s.isLive ? 0.93 : 0.5))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: 96, alignment: .leading)
+
+            Text(s.activity.title)
+                .font(.system(size: 10))
+                .foregroundColor(Color(white: s.isLive ? 0.7 : 0.42))
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 4)
+
+            Text(s.shortTag)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(Color(white: s.isLive ? 0.85 : 0.5))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(Color.white.opacity(s.isLive ? 0.12 : 0.06)))
+                .fixedSize()
+
+            Text(rowElapsed(s))
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundColor(Color(white: 0.55))
+                .fixedSize()
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(RoundedRectangle(cornerRadius: 5)
+            .fill(Color.white.opacity(isPrimary ? 0.09 : 0.0)))
+    }
+
+    /// 行内耗时。只在会话**活跃**时显示 —— 待命会话的 `turnStartTime` 是上一回合的
+    /// 起点，照着算会得出「已经跑了 3 小时」这种莫名的数字，比留空更容易误读。
+    private func rowElapsed(_ s: SessionEntry) -> String {
+        guard s.isLive, let t0 = s.activity.turnStartTime else { return "--:--" }
+        return Activity.formatDuration(ms: state.now - t0)
     }
 
     /// 首行：状态角标 + 标题 + 轮次 + 交互提示

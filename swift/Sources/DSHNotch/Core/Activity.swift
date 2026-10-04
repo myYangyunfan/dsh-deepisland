@@ -135,6 +135,12 @@ struct ActivityCursor {
     private var everSawEvent = false
     /// 进入 `.done` 的时刻，用于超时后转回 `.idle`
     private var doneAt: Double?
+    /// 最后一个已处理事件的时间戳（毫秒）。
+    ///
+    /// App 启动时会**重放整个历史会话**。若不看事件自己的时间，几天前的会话
+    /// 会以它当时的中间状态（「正在分析工具执行结果」「执行 bash」）出现在岛上，
+    /// 而且因为文件不再更新，那个状态会永远停在那里。App 层据此做停摆降级。
+    private(set) var lastEventTime: Double?
     /// callId → 工具名（事件流给映射，投影只给在飞的 callId）
     private var callNames: [String: String] = [:]
 
@@ -146,6 +152,7 @@ struct ActivityCursor {
         sawTurnEnd = false
         everSawEvent = false
         doneAt = nil
+        lastEventTime = nil
         callNames.removeAll()
     }
 
@@ -166,6 +173,7 @@ struct ActivityCursor {
             guard let seq = ev.seq, seq > lastSeq else { continue }
             lastSeq = seq
             everSawEvent = true
+            lastEventTime = ev.time ?? now
             handle(ev, now: now)
         }
         if !everSawEvent { return .idle }
@@ -287,7 +295,9 @@ struct ActivityCursor {
             current.currentTool = nil
             current.isWaitingApproval = false
             sawTurnEnd = true
-            doneAt = now
+            // 用**事件自己的时间**而非 now：App 启动重放历史时，几小时前结束的
+            // 回合不该在这里获得一段新的 5 秒回执期（否则一排历史会话全显示"已完成"）
+            doneAt = ev.time ?? now
             return
         }
 
@@ -296,7 +306,7 @@ struct ActivityCursor {
             current.status = .done
             current.title = "执行遇到注意项"
             current.detail = "工具返回警告"
-            doneAt = now
+            doneAt = ev.time ?? now
             return
         }
 

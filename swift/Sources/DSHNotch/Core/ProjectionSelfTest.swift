@@ -181,37 +181,57 @@ final class ProjectionSelfTest {
 
     private func testDoneHold() {
         print("· 完成态保持（结果不立刻消失）")
-        guard let start = event(#"{"type":"turn/start","seq":1,"time":1000,"data":{"turn":1}}"#),
-              let call = event(#"{"type":"tool/call","seq":2,"time":1500,"data":{"callId":"c1","name":"bash","arguments":"{}"}}"#),
-              let end = event(#"{"type":"turn/end","seq":3,"time":2000,"data":{"turn":1}}"#)
+        // 事件时间用**真实毫秒级 epoch**：doneAt 现在取自事件自己的时间戳
+        // （为了不让历史会话在启动瞬间集体显示「已完成」），用 1000/2000 这种
+        // 玩具数字会立刻被判定成「历史重放」而拿不到回执期。
+        let t0: Double = 1_791_000_000_000
+        func ev(_ type: String, _ seq: Int, _ offset: Double, _ extra: String) -> SessionEvent? {
+            event("{\"type\":\"\(type)\",\"seq\":\(seq),\"time\":\(Int(t0 + offset)),\"data\":{\(extra)}}")
+        }
+        guard let start = ev("turn/start", 1, 0, "\"turn\":1"),
+              let call = ev("tool/call", 2, 500,
+                            "\"callId\":\"c1\",\"name\":\"bash\",\"arguments\":\"{}\""),
+              let end = ev("turn/end", 3, 1000, "\"turn\":1")
         else {
             check(false, "完成态事件构造失败")
             return
         }
 
         var cursor = ActivityCursor()
-        let t0: Double = 100_000
-        let a = cursor.apply([start, call, end], now: t0)
+        // now 取「turn/end 之后 1 秒」
+        let a = cursor.apply([start, call, end], now: t0 + 2000)
         checkEqual(a.status, .done, "回合结束 → done（而不是立刻 idle）")
         checkEqual(a.title, "任务已完成", "done 标题")
         checkEqual(a.isActive, true, "done 仍算活跃（岛要保持显示）")
 
-        // 保持期内
-        let b = cursor.apply([start, call, end], now: t0 + 3000)
+        // 保持期内（距 turn/end 3 秒）
+        let b = cursor.apply([start, call, end], now: t0 + 4000)
         checkEqual(b.status, .done, "3 秒内仍为 done")
 
         // 超过保持期 → 归位
-        let c = cursor.apply([start, call, end], now: t0 + ActivityCursor.doneHoldMs + 200)
+        let c = cursor.apply([start, call, end], now: t0 + 1000 + ActivityCursor.doneHoldMs + 200)
         checkEqual(c.status, .idle, "超过保持期 → idle（岛收起）")
         checkEqual(c.isActive, false, "idle 不活跃")
 
         // 保持期内来了新回合 → 应立刻回到思考态
         var cursor2 = ActivityCursor()
-        _ = cursor2.apply([start, call, end], now: t0)
-        let fresh = event(#"{"type":"turn/start","seq":4,"time":3000,"data":{"turn":2}}"#)!
-        let d = cursor2.apply([start, call, end, fresh], now: t0 + 1000)
+        _ = cursor2.apply([start, call, end], now: t0 + 2000)
+        let fresh = ev("turn/start", 4, 1500, "\"turn\":2")!
+        let d = cursor2.apply([start, call, end, fresh], now: t0 + 3000)
         checkEqual(d.status, .thinking, "新回合打断 done")
         checkEqual(d.toolCount, 0, "新回合工具计数清零")
+
+        // 历史重放：几小时前结束的回合**不该**获得一段新的 5 秒回执期
+        // （否则 App 一启动，一排历史会话全显示「任务已完成」）
+        var cursor3 = ActivityCursor()
+        // 取整：事件里的 time 是整数毫秒，留着小数会让下面的相等断言永远差一点点
+        let longAgo = (Date().timeIntervalSince1970 * 1000).rounded(.down) - 3 * 3600_000
+        let hStart = event("{\"type\":\"turn/start\",\"seq\":1,\"time\":\(Int(longAgo)),\"data\":{\"turn\":1}}")!
+        let hEnd = event("{\"type\":\"turn/end\",\"seq\":2,\"time\":\(Int(longAgo + 1000)),\"data\":{\"turn\":1}}")!
+        let e = cursor3.apply([hStart, hEnd], now: Date().timeIntervalSince1970 * 1000)
+        checkEqual(e.status, .idle, "重放几小时前结束的回合 → 直接 idle（不给新回执期）")
+        check(cursor3.lastEventTime == longAgo + 1000, "游标记录了最后事件时间")
+        check(cursor3.lastEventTime != nil, "最后事件时间可读（供停摆降级判定）")
     }
 
     // MARK: - 真实文件

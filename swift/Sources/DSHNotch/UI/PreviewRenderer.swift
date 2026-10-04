@@ -12,65 +12,159 @@ import SwiftUI
 /// 用法：`DSHNotch --render-preview <输出目录>`
 enum PreviewRenderer {
 
+    /// 一个预览用例：`sessions` 非空即渲染**多会话列表布局**（activity 取主会话）。
+    private struct PreviewCase {
+        let name: String
+        let activity: Activity
+        var sessions: [SessionEntry] = []
+        let expanded: Bool
+    }
+
     static func render(to dir: String, metrics: NotchMetrics) {
         let dirURL = URL(fileURLWithPath: dir)
         try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
 
         let now = Date().timeIntervalSince1970 * 1000
-        let cases: [(String, Activity, Bool)] = [
-            ("preview-compact-tool.png",
-             sample(status: .tool, title: "执行 bash", detail: "ls -la ~/.dsh/sessions | head -20",
-                    tool: "bash", toolCount: 7, elapsedMs: 34_000, now: now,
-                    proj: richProjections(contextUsed: 77_628)), false),
-            ("preview-compact-waiting.png",
-             sample(status: .waiting, title: "等待人工确认", detail: "提问: 是否覆盖写回文件？",
-                    tool: "ask", toolCount: 3, elapsedMs: 128_000, now: now,
-                    proj: richProjections(contextUsed: 168_000), waiting: true), false),
-            ("preview-compact-done.png",
-             sample(status: .done, title: "任务已完成", detail: "调用 7 次工具",
-                    tool: nil, toolCount: 7, elapsedMs: 96_000, now: now,
-                    proj: richProjections(contextUsed: 77_628,
-                                          todos: [("调研开源项目", "completed"),
-                                                  ("设计技术蓝图", "in_progress"),
-                                                  ("写文档", "pending")],
-                                          pending: [])), false),
-            ("preview-expanded.png",
-             sample(status: .tool, title: "执行 edit", detail: "swift/Sources/DSHNotch/UI/NotchShape.swift",
-                    tool: "edit", toolCount: 12, elapsedMs: 96_000, now: now,
-                    proj: richProjections(contextUsed: 77_628,
-                                          todos: [("调研开源项目", "completed"),
-                                                  ("设计技术蓝图", "in_progress"),
-                                                  ("写文档", "pending")],
-                                          pending: ["call_a", "call_b"]),
-                    agents: 1), true),
-            ("preview-expanded-alert.png",
-             sample(status: .tool, title: "执行 bash", detail: "npm run build --production && npm test",
-                    tool: "bash", toolCount: 23, elapsedMs: 372_000, now: now,
-                    proj: richProjections(contextUsed: 228_000,
-                                          pending: ["call_a", "call_b", "call_c", "call_d"]),
-                    agents: 2), true),
+        let cases: [PreviewCase] = [
+            PreviewCase(name: "preview-compact-tool.png",
+                        activity: sample(status: .tool, title: "执行 bash",
+                                         detail: "ls -la ~/.dsh/sessions | head -20",
+                                         tool: "bash", toolCount: 7, elapsedMs: 34_000, now: now,
+                                         proj: richProjections(contextUsed: 77_628)),
+                        expanded: false),
+            PreviewCase(name: "preview-compact-waiting.png",
+                        activity: sample(status: .waiting, title: "等待人工确认",
+                                         detail: "提问: 是否覆盖写回文件？",
+                                         tool: "ask", toolCount: 3, elapsedMs: 128_000, now: now,
+                                         proj: richProjections(contextUsed: 168_000), waiting: true),
+                        expanded: false),
+            PreviewCase(name: "preview-compact-done.png",
+                        activity: sample(status: .done, title: "任务已完成", detail: "调用 7 次工具",
+                                         tool: nil, toolCount: 7, elapsedMs: 96_000, now: now,
+                                         proj: richProjections(contextUsed: 77_628,
+                                                               todos: [("调研开源项目", "completed"),
+                                                                       ("设计技术蓝图", "in_progress"),
+                                                                       ("写文档", "pending")],
+                                                               pending: [])),
+                        expanded: false),
+            PreviewCase(name: "preview-expanded.png",
+                        activity: sample(status: .tool, title: "执行 edit",
+                                         detail: "swift/Sources/DSHNotch/UI/NotchShape.swift",
+                                         tool: "edit", toolCount: 12, elapsedMs: 96_000, now: now,
+                                         proj: richProjections(contextUsed: 77_628,
+                                                               todos: [("调研开源项目", "completed"),
+                                                                       ("设计技术蓝图", "in_progress"),
+                                                                       ("写文档", "pending")],
+                                                               pending: ["call_a", "call_b"]),
+                                         agents: 1),
+                        expanded: true),
+            PreviewCase(name: "preview-expanded-alert.png",
+                        activity: sample(status: .tool, title: "执行 bash",
+                                         detail: "npm run build --production && npm test",
+                                         tool: "bash", toolCount: 23, elapsedMs: 372_000, now: now,
+                                         proj: richProjections(contextUsed: 228_000,
+                                                               pending: ["call_a", "call_b",
+                                                                         "call_c", "call_d"]),
+                                         agents: 2),
+                        expanded: true),
+
+            // 多会话：折叠态显示主会话 + 会话数徽标（工具名让位给计数）
+            PreviewCase(name: "preview-compact-multi.png",
+                        activity: multiSessions(now: now, count: 3)[0].activity,
+                        sessions: multiSessions(now: now, count: 3),
+                        expanded: false),
+            // 多会话：展开态一屏列出全部对话（3 个，含一个等人确认的在最上面）
+            PreviewCase(name: "preview-multi-3.png",
+                        activity: multiSessions(now: now, count: 3)[0].activity,
+                        sessions: multiSessions(now: now, count: 3),
+                        expanded: true),
+            // 多会话：拉到上限 6 个，验证高度确实按行数长、内容没被裁
+            PreviewCase(name: "preview-multi-6.png",
+                        activity: multiSessions(now: now, count: 6)[0].activity,
+                        sessions: multiSessions(now: now, count: 6),
+                        expanded: true),
         ]
 
-        for (name, activity, expanded) in cases {
-            let path = dirURL.appendingPathComponent(name).path
-            guard let rep = renderOne(activity: activity, expanded: expanded, metrics: metrics, to: path) else {
+        for c in cases {
+            let path = dirURL.appendingPathComponent(c.name).path
+            guard let rep = renderOne(activity: c.activity, sessions: c.sessions,
+                                      expanded: c.expanded, metrics: metrics, to: path) else {
                 print("渲染失败 \(path)")
                 continue
             }
             print("已输出 \(path)")
 
             // 再出一张 2 倍放大的中心裁切图 —— 形状细节在全屏图里看不清。
-            // 裁切高度要盖住整块岛（展开 176pt / 折叠 50pt），否则底部信息行会被切掉。
-            let zoomName = name.replacingOccurrences(of: ".png", with: "-zoom.png")
+            // 裁切高度跟着**实际形状高度**走：多会话列表比单会话高，写死会切掉底部。
+            let islandH = metrics.islandSize(expanded: c.expanded, sessionRows: c.sessions.count).height
+            let zoomName = c.name.replacingOccurrences(of: ".png", with: "-zoom.png")
             let zoomPath = dirURL.appendingPathComponent(zoomName).path
-            let cropWidth: CGFloat = expanded ? 700 : 460
-            let cropHeight: CGFloat = expanded ? 210 : 110
+            let cropWidth: CGFloat = c.expanded ? 700 : 460
+            let cropHeight: CGFloat = max(islandH + 44, c.expanded ? 216 : 110)
             let region = NSRect(x: metrics.screenFrame.midX - metrics.screenFrame.minX - cropWidth / 2,
                                 y: 0, width: cropWidth, height: cropHeight)
             if crop(from: rep, region: region, zoom: 2, canvasWidth: metrics.screenFrame.width, to: zoomPath) {
                 print("已输出 \(zoomPath)")
             }
         }
+    }
+
+    // MARK: - 多会话预览数据
+
+    /// 造一组多会话样本（已按 `SessionMonitor.order` 排好序，与真实运行一致）。
+    ///
+    /// 会话名用中文标题而非路径名 —— DSH 会把会话标题写进投影缓存
+    /// （本机实测如「高难度数学试卷出题」），那才是列表里真正显示的文本。
+    private static func multiSessions(now: Double, count: Int) -> [SessionEntry] {
+        let waiting = entry("sodasystem 软著",
+                            sample(status: .waiting, title: "等待人工确认",
+                                   detail: "提问: 是否覆盖写回 软著申请材料.docx？",
+                                   tool: "ask", toolCount: 3, elapsedMs: 128_000, now: now,
+                                   proj: richProjections(contextUsed: 168_000), waiting: true),
+                            ageSec: 9, project: "--Users-delinger-Desktop-~7EFC~6D4B--")
+        let tool = entry("深岛刘海插件",
+                         sample(status: .tool, title: "执行 edit",
+                                detail: "swift/Sources/DSHNotch/UI/NotchContentView.swift",
+                                tool: "edit", toolCount: 12, elapsedMs: 96_000, now: now,
+                                proj: richProjections(contextUsed: 77_628),
+                                agents: 2),
+                         ageSec: 1, project: "--Users-delinger-Desktop-deepisland--")
+        let thinking = entry("高难度数学试卷出题",
+                             sample(status: .thinking, title: "深度思考中...",
+                                    detail: "正在为第 12 题构造干扰项",
+                                    tool: nil, toolCount: 4, elapsedMs: 62_000, now: now,
+                                    proj: richProjections(contextUsed: 96_000)),
+                             ageSec: 3, project: "--Users-delinger-Desktop-office--")
+        let done = entry("itti.top 巡检",
+                         sample(status: .done, title: "任务已完成", detail: "调用 9 次工具",
+                                tool: nil, toolCount: 9, elapsedMs: 214_000, now: now,
+                                proj: richProjections(contextUsed: 64_000)),
+                         ageSec: 40, project: "--Users-delinger-Desktop-office--")
+        let idle1 = entry("GOFS 部署脚本",
+                          sample(status: .idle, title: "DeepSeek 待命", detail: "等待指令输入",
+                                 tool: nil, toolCount: 0, elapsedMs: 0, now: now,
+                                 proj: richProjections(contextUsed: 31_000)),
+                          ageSec: 600, project: "--Users-delinger-Desktop-gofs--")
+        let idle2 = entry("概率论 20 课时",
+                          sample(status: .idle, title: "DeepSeek 待命", detail: "等待指令输入",
+                                 tool: nil, toolCount: 0, elapsedMs: 0, now: now,
+                                 proj: richProjections(contextUsed: 52_000)),
+                          ageSec: 1200, project: "--Users-delinger-Desktop-office--")
+
+        let all = [idle2, idle1, done, thinking, tool, waiting]
+        return Array(SessionMonitor.order(all).prefix(count))
+    }
+
+    private static func entry(_ label: String,
+                              _ activity: Activity,
+                              ageSec: Double,
+                              project: String) -> SessionEntry {
+        SessionEntry(id: label,
+                     file: URL(fileURLWithPath: "/tmp/preview/\(label)"),
+                     project: project,
+                     mtime: Date().addingTimeInterval(-ageSec),
+                     label: label,
+                     activity: activity)
     }
 
     // MARK: - 预览数据
@@ -153,16 +247,19 @@ enum PreviewRenderer {
 
     @discardableResult
     private static func renderOne(activity: Activity,
+                                  sessions: [SessionEntry],
                                   expanded: Bool,
                                   metrics: NotchMetrics,
                                   to path: String) -> NSBitmapImageRep? {
         let state = NotchViewState()
         state.activity = activity
+        state.sessions = sessions
         state.isExpanded = expanded
 
-        // 画布：整屏宽 × 顶部 200pt（够放下展开 HUD + 标注）
+        // 画布：整屏宽 × 够放下**最大**展开 HUD + 底部标注。
+        // 多会话列表能长到 6 行（235pt），写死高度会把它截掉。
         let canvasW = metrics.screenFrame.width
-        let canvasH = metrics.notchHeight + 200
+        let canvasH = metrics.maxExpandedSize.height + 80
 
         let root = PreviewCanvas(metrics: metrics,
                                  state: state,
@@ -216,7 +313,10 @@ private struct PreviewCanvas: View {
             // 标注
             VStack {
                 Spacer()
-                Text("\(state.isExpanded ? "展开态" : "折叠态")  |  刘海 \(Int(metrics.notchWidth))×\(Int(metrics.notchHeight))pt  |  白框内为物理挖孔（其上不可绘制）")
+                Text("\(state.isExpanded ? "展开态" : "折叠态")  |  "
+                     + "\(state.sessions.count > 1 ? "\(state.sessions.count) 个会话" : "单会话")  |  "
+                     + "刘海 \(Int(metrics.notchWidth))×\(Int(metrics.notchHeight))pt  |  "
+                     + "白框内为物理挖孔（其上不可绘制）")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(.white.opacity(0.75))
                     .padding(.bottom, 18)

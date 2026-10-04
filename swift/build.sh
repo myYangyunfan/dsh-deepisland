@@ -11,6 +11,8 @@
 #   ./build.sh preview    # 编译后离屏渲染形状预览图到 .build/preview/
 #   ./build.sh self-test  # 注入合成 NSEvent，验证点击 → 钉住链路
 #   ./build.sh proj-test  # 在真实投影缓存 + 事件流上验证指标解析
+#   ./build.sh sess-test  # 多会话：排序 / 展开尺寸 / 停摆降级 / 真实多会话发现
+#   ./build.sh all-tests  # 上面三套自检全跑一遍
 #   ./build.sh probes     # 编译自检探针到 .build/probes/
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -54,6 +56,20 @@ case "${1:-}" in
   proj-test)
     echo "==> 投影自检（真实缓存 + 事件流端到端）"
     "$BIN" --self-test-projections
+    ;;
+  sess-test)
+    echo "==> 多会话自检（排序 / 尺寸 / 停摆降级 / 真实发现）"
+    "$BIN" --self-test-sessions
+    ;;
+  all-tests)
+    echo "==> 交互自检"
+    "$BIN" --self-test
+    echo
+    echo "==> 投影自检"
+    "$BIN" --self-test-projections
+    echo
+    echo "==> 多会话自检"
+    "$BIN" --self-test-sessions
     ;;
   probes)
     echo "==> 编译自检探针"

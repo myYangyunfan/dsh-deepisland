@@ -44,10 +44,38 @@ struct NotchMetrics {
     ///
     /// 高度 160 → 176：信息行从「耗时 / 工具调用」两格扩到「耗时 / 工具 / 输出 token /
     /// 上下文占用」，另加一行模型信息与一条待办行，132pt 的内容带已放不下。
-    var expandedSize: CGSize {
+    ///
+    /// 这是**单会话**时的尺寸；多会话改用 `expandedSize(sessionRows:)`。
+    var expandedSize: CGSize { expandedSize(sessionRows: 1) }
+
+    // MARK: - 多会话展开尺寸
+
+    /// 同时渲染的会话行数上限（超出只显示前几个）
+    static let maxSessionRows = 6
+    /// 展开列表中每个会话行的高度
+    static let sessionRowHeight: CGFloat = 22
+    /// 会话行之间的间距
+    static let sessionRowGap: CGFloat = 3
+
+    /// 展开 HUD 尺寸：会话数决定高度。
+    ///
+    /// 多会话时的高度 = 刘海 + 头部 + 行区 + 统计 + 内边距，并**以单会话高度为下限**
+    /// —— 否则 1 个会话（176pt，带详情块）切到 2 个会话（列表布局，更矮）时形状会
+    /// 突然缩一截，读起来像"面板塌了"。
+    func expandedSize(sessionRows n: Int) -> CGSize {
         let w = min(notchWidth + expandedWing * 2, screenFrame.width - 48)
-        return CGSize(width: max(w, compactSize.width), height: notchHeight + 148)
+        let width = max(w, compactSize.width)
+
+        let rows = min(max(n, 1), NotchMetrics.maxSessionRows)
+        let rowBlock = CGFloat(rows) * NotchMetrics.sessionRowHeight
+            + CGFloat(max(0, rows - 1)) * NotchMetrics.sessionRowGap
+        // 28(挖孔) + 18(头部) + 6 + 行区 + 6 + 16(统计) + 14(上下内边距)
+        let needed = notchHeight + 18 + 6 + rowBlock + 6 + 16 + 14
+        return CGSize(width: width, height: max(notchHeight + 148, needed))
     }
+
+    /// 窗口按**最大**展开尺寸开：展开时只改形状高度，窗口不动，动画不会被裁。
+    var maxExpandedSize: CGSize { expandedSize(sessionRows: NotchMetrics.maxSessionRows) }
 
     /// 刘海下方那条用来显示文字的信息带高度
     var infoBandHeight: CGFloat { hasNotch ? 22 : 0 }
@@ -55,10 +83,10 @@ struct NotchMetrics {
     /// 面板窗口外扩（给光晕/阴影留绘制空间，顶端不外扩）
     static let bleed: CGFloat = 20
 
-    /// 窗口尺寸：按展开态取最大，避免展开时被裁掉
+    /// 窗口尺寸：按**最大**展开态取，避免展开（尤其是多会话变高）时被裁掉
     var windowSize: NSSize {
-        NSSize(width: expandedSize.width + Self.bleed * 2,
-               height: expandedSize.height + Self.bleed)
+        NSSize(width: maxExpandedSize.width + Self.bleed * 2,
+               height: maxExpandedSize.height + Self.bleed)
     }
 
     // MARK: - 探测
@@ -109,16 +137,25 @@ struct NotchMetrics {
 
     // MARK: - 命中区（屏幕坐标，AppKit 左下原点）
 
-    /// 岛体矩形：顶端贴屏，水平居中。
+    /// 给定状态下的形状尺寸：展开态高度随会话数变化。
+    func islandSize(expanded: Bool, sessionRows: Int) -> CGSize {
+        expanded ? expandedSize(sessionRows: sessionRows) : compactSize
+    }
+
+    /// 岛体矩形（给定形状尺寸）：顶端贴屏，水平居中。
     ///
-    /// 悬停/点击判定都用它，而不是窗口矩形 —— 窗口按展开态取最大并含
-    /// `bleed` 留白（480×180），拿窗口当热区会把菜单栏一大片都算成"岛上"。
+    /// 悬停/点击判定都用它，而不是窗口矩形 —— 窗口按**最大**展开态开
+    /// （含 `bleed` 留白），拿窗口当热区会把菜单栏一大片都算成"岛上"。
+    /// 多会话展开时形状高度是变的，所以热区必须按**当前**尺寸算。
+    func islandRect(size: CGSize) -> NSRect {
+        NSRect(x: screenFrame.midX - size.width / 2,
+               y: screenFrame.maxY - size.height,
+               width: size.width,
+               height: size.height)
+    }
+
     func islandRect(expanded: Bool) -> NSRect {
-        let size = expanded ? expandedSize : compactSize
-        return NSRect(x: screenFrame.midX - size.width / 2,
-                      y: screenFrame.maxY - size.height,
-                      width: size.width,
-                      height: size.height)
+        islandRect(size: expanded ? expandedSize : compactSize)
     }
 
     /// 悬停热区：折叠态岛体向外扩 8pt。
@@ -130,11 +167,16 @@ struct NotchMetrics {
     }
 
     var describe: String {
-        String(format: "屏幕 %.0f×%.0f@%.0fx | 刘海 %.0f×%.0f @(x=%.0f,y=%.0f) | 折叠 %.0f×%.0f | 展开 %.0f×%.0f",
-               screenFrame.width, screenFrame.height,
-               (NSScreen.main?.backingScaleFactor ?? 2),
-               notchWidth, notchHeight, notchRect.minX, notchRect.minY,
-               compactSize.width, compactSize.height,
-               expandedSize.width, expandedSize.height)
+        // 注意：String(format:) **不会**校验参数个数，少给一个就会整体错位、
+        // 静默输出垃圾（展开宽度变成高度、行数变成 0）。所以先把尺寸取出来，
+        // 并让自检断言输出内容（见 SessionSelfTest.testSizes）。
+        let single = expandedSize(sessionRows: 1)
+        return String(format: "屏幕 %.0f×%.0f@%.0fx | 刘海 %.0f×%.0f @(x=%.0f,y=%.0f) | 折叠 %.0f×%.0f | 展开 %.0f×%.0f（单会话）/ 最高 %.0f（%ld 会话）",
+                      screenFrame.width, screenFrame.height,
+                      (NSScreen.main?.backingScaleFactor ?? 2),
+                      notchWidth, notchHeight, notchRect.minX, notchRect.minY,
+                      compactSize.width, compactSize.height,
+                      single.width, single.height,
+                      maxExpandedSize.height, NotchMetrics.maxSessionRows)
     }
 }

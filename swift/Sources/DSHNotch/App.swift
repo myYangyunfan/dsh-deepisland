@@ -40,6 +40,13 @@ enum DSHNotchMain {
             exit(test.run() ? 0 : 1)
         }
 
+        // 自检模式：多会话排序 / 展开尺寸 / 真实多会话发现（不启动 UI）
+        if CommandLine.arguments.contains("--self-test-sessions") {
+            _ = NSApplication.shared
+            let test = SessionSelfTest()
+            exit(test.run() ? 0 : 1)
+        }
+
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -59,7 +66,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let source = SessionSource()
     /// 会话投影缓存（token / 上下文 / 待办 / 模型 —— 事件流里没有的结构化指标）
     private let projections = ProjectionCache()
-    private var cursor = ActivityCursor()
+    /// 多会话监控：每个会话一套独立游标。DSH 可以同时开多个对话，
+    /// 只跟最新那一个文件会丢掉其余对话的状态。
+    private lazy var monitor = SessionMonitor(source: source, projections: projections)
+    /// 轮询序号（供监控器给非主会话降频）
+    private var tickIndex = 0
     private let state = NotchViewState()
     private let metrics = NotchMetrics.current()
     private var isVisible = false
@@ -121,7 +132,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.installContent(NotchContentView(metrics: metrics, state: state))
         self.panel = panel
         NSLog("[dsh-notch] zstd 工具: \(SessionSource.zstdToolPath ?? "未找到（将无法读取会话）")")
-        NSLog("[dsh-notch] 最新会话: \(source.latestSessionFile()?.lastPathComponent ?? "无")")
+        let bootFiles = source.sessionFiles()
+        NSLog("[dsh-notch] 候选会话 \(bootFiles.count) 个: \(bootFiles.map { String($0.id.prefix(14)) }.joined(separator: ", "))")
         NSLog("[dsh-notch] DSH 运行中: \(dshRunning) | 悬停热区: \(metrics.hoverHotRect)")
 
         let wc = NSWorkspace.shared.notificationCenter
@@ -262,9 +274,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         待办进度与当前待办项、耗时、工具调用次数、输出 token 数、
         上下文占用百分比、在飞的工具/子代理数、模型名与权限预设。
 
+        ── 多个对话 ──
+        DSH 同时开多个对话时，刘海同时跟随最多 6 个活跃会话（最近 30 分钟
+        有写入的那些）。折叠态显示最该关注的那个，右侧徽标 ⚏2/3 表示
+        「3 个在跟、2 个在跑」；展开态每个对话各占一行，按
+        「等人工确认 > 执行工具 > 思考中 > 已完成 > 待命」排序，
+        主会话那行有底色。任一会话在等你确认都会自动展开提醒，不只是主会话。
+
         菜单栏波形图标里还有：悬停展开开关、空闲自动收起、开机自启、
         定位会话文件、导出形状预览图、退出。
 
+        ── 数据 ──
         数据来自 ~/.dsh/sessions（事件流，zstd 解压后增量读取）与
         ~/.dsh/storages/session_projcache（DSH 自己的状态投影，
         提供 token / 上下文 / 待办等事件流里没有的指标）。
@@ -301,9 +321,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyExpansion() {
-        // 展开条件：用户钉住 / 等人工确认 / 鼠标悬停 / 启动演示
+        // 展开条件：用户钉住 / **任一会话**等人工确认 / 鼠标悬停 / 启动演示
+        // （原来是只看主会话，多会话时某个次要对话在等人会被漏掉）
         let shouldExpand = state.pinned
-            || state.activity.isWaitingApproval
+            || state.sessions.contains { $0.activity.isWaitingApproval }
             || (hoverExpand && hovering)
             || showcaseActive
         if state.isExpanded != shouldExpand { state.isExpanded = shouldExpand }
@@ -420,8 +441,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let p = NSEvent.mouseLocation
         let compactHot = metrics.hoverHotRect
-        // 展开态整块也算「还在岛上」：鼠标往下挪进 HUD 读信息时不该收起
-        let currentHot = metrics.islandRect(expanded: state.isExpanded).insetBy(dx: -8, dy: -8)
+        // 展开态整块也算「还在岛上」：鼠标往下挪进 HUD 读信息时不该收起。
+        // 高度按**当前会话数**算 —— 多会话列表比单会话高，热区跟着长。
+        let currentHot = metrics.islandRect(size: metrics.islandSize(expanded: state.isExpanded,
+                                                                    sessionRows: state.sessions.count))
+            .insetBy(dx: -8, dy: -8)
             .union(compactHot)
         let insideHot = currentHot.contains(p)
 
@@ -465,24 +489,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func tick() {
-        let events = source.loadEvents()
         let now = Date().timeIntervalSince1970 * 1000
-        // 投影缓存是可选的第二数据源：读不到就退化为纯事件流展示
-        let proj = source.latestSessionFile().flatMap { projections.load(for: $0) }
-        let activity = cursor.apply(events, now: now, projections: proj)
+        tickIndex &+= 1
+        // 一次轮询拿到**全部**候选会话（按关注度排序，第一个是主会话）
+        let sessions = monitor.poll(now: now, tickIndex: tickIndex)
+        let activity = sessions.first?.activity ?? .idle
 
         // 状态驱动：只在真正变化时写入 @Published，避免打断动画
         state.now = now
+        if state.sessions != sessions { state.sessions = sessions }
         if state.activity != activity { state.activity = activity }
 
         if activity.isActive {
             lastActiveAt = Date()
         }
 
-        // 首帧打一条诊断：确认数据通路真的通了（读到了多少事件、推出了什么状态）
+        // 首帧打一条诊断：确认数据通路真的通了
         if !didLogFirstTick {
             didLogFirstTick = true
-            NSLog("[dsh-notch] 首帧: 事件 \(events.count) 条, seq 游标 \(cursor.lastSeq), 状态 \(activity.status.rawValue), 「\(activity.title)」")
+            let names = sessions.map { "\($0.label.prefix(12))(\($0.activity.status.rawValue))" }
+                .joined(separator: ", ")
+            NSLog("[dsh-notch] 首帧: 会话 \(sessions.count) 个 [\(names)] 主会话「\(activity.title)」")
         }
 
         applyExpansion()
@@ -518,7 +545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 手动触发一次刷新（设置变更后调用）。
     private func refresh(force: Bool) {
-        if force { cursor.reset() }
+        if force { monitor.reset() }
         tick()
     }
 }
