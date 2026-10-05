@@ -243,6 +243,34 @@ struct NotchContentView: View {
     }
 
     /// 单会话：保留原来的丰富布局（详情正文块 + 待办行 + 统计 + 模型行）
+    ///
+    /// ## 为什么不是「整块都可点」
+    ///
+    /// 直觉上「单会话时整个面板都是那一个对话，整块可点最顺手」——
+    /// 但整块可点会和外层的「点一下 = 钉住/取消」**抢手势**：
+    /// SwiftUI 里子视图的手势优先于父视图，一旦这里整块接管，
+    /// 展开态就再也钉不住了。（本项目真踩过：改成整块后 --self-test 当场报
+    /// 「展开态下点击 → 仍应钉住」失败。）
+    ///
+    /// 折叠态没有对话可跳，点一下必须是钉住；展开态点对话才是跳转。
+    /// 两者要共存，就得让「跳转」有明确的热区。
+    ///
+    /// ## 现在的分工
+    ///
+    /// | 点哪里 | 折叠态 | 展开态（单会话） |
+    /// | :--- | :--- | :--- |
+    /// | 详情正文块 | 钉住 | **跳到该对话** |
+    /// | 标题 / 待办 / 统计 / 模型行 | 钉住 | 钉住（= 点非对话区） |
+    ///
+    ///
+    /// 整块都可点：单会话时整个面板**就是**那一个对话的化身，
+    /// 没什么「点哪一块」可分的。以前只有中间的详情块能点，
+    /// 标题、待办、统计这些地方点下去毫无反应 —— 用户的直觉是「这整个岛都是它」。
+    ///
+    /// `contentShape(Rectangle())` 是必需的：VStack 背景透明，
+    /// 不显式声明形状的话，空白处根本收不到点击。
+    /// 已确认 headerRow / todoRow / statsRow / metaRow 内部都没有自己的
+    /// Button 或 onTapGesture，所以父级手势不会吞掉任何交互。
     private var singleSessionHUD: some View {
         VStack(spacing: 6) {
             headerRow
@@ -256,7 +284,8 @@ struct NotchContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.07)))
-                // 单会话时，这块正文就是「这个对话」的代表 —— 点它即跳转
+                // 单会话时，这块正文就是「这个对话」的代表 —— 点它即跳转。
+                // contentShape 必需：Text 只占文字那么大，padding 出来的空白收不到点击。
                 .contentShape(Rectangle())
                 .onTapGesture { openPrimarySession() }
 
@@ -292,7 +321,14 @@ struct NotchContentView: View {
 
             Spacer(minLength: 0)
 
+            // 底部统计行只显示**主会话**（排序第一）的指标，
+            // 所以点它跳主会话是明确的、不会歧义。
+            // 但整个多会话面板**不**做成整块可点 —— 多个对话并存时，
+            // 「面板的空白处」没有明确目标，用户点它期望跳到哪个会话说不清；
+            // 而且这会盖掉「点非对话区 = 钉住/取消」这个既有手势。
             statsRow
+                .contentShape(Rectangle())
+                .onTapGesture { openPrimarySession() }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)

@@ -23,9 +23,153 @@ final class SessionSelfTest {
         testStaleDemotion()
         print("· 真实多会话发现与轮询")
         testRealSessions(metrics)
+        print("· 点击热区（单会话整块可跳 / 多会话行可点）")
+        testClickTargets()
         print("")
         print("[dsh-notch] 多会话自检结束：通过 \(passed)，失败 \(failed)")
         return failed == 0
+    }
+
+    /// 点击热区的结构断言。
+    ///
+    /// 背景：原先**只有单会话中间那块详情文字能点**，标题、待办、统计、模型行
+    /// 点下去毫无反应 —— 但单会话时整个面板就是那一个对话，
+    /// 用户的直觉是「这整块都是它」。改成整块可点后，
+    /// 「点非对话区 = 钉住/取消」这个手势在单会话下就没有落点了，
+    /// 所以顺手把折叠态那条路径留着（那里本来就是独立手势）。
+    ///
+    /// SwiftUI 没法在运行时遍历视图树，所以只能对源码做结构断言 ——
+    /// 至少能守住「别把 contentShape/onTapGesture 弄丢」这种回归。
+    private func testClickTargets() {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../UI/NotchContentView.swift")
+        guard let src = try? String(contentsOf: url, encoding: .utf8) else {
+            check(false, "能读到 NotchContentView.swift 源码")
+            return
+        }
+        check(true, "能读到 NotchContentView.swift 源码")
+
+        // singleSessionHUD 的函数体
+        guard let start = src.range(of: "private var singleSessionHUD: some View") else {
+            check(false, "能在源码里定位到 singleSessionHUD")
+            return
+        }
+        let body = Self.braceBody(from: start.lowerBound, in: src)
+
+        // 🔴 下面两条是踩过坑才加的：曾把整个面板做成可点，结果抢掉了外层
+        // 「点一下 = 钉住/取消」的手势，展开态再也钉不住
+        // （--self-test 当场报「展开态下点击 → 仍应钉住」失败）。
+        // SwiftUI 里子视图手势优先于父视图，整块可点 = 吞掉钉住。
+        let singleTaps = Self.tapScan(body)
+        check(singleTaps.wrapsPanel == false,
+              "singleSessionHUD 没有做成整块可点（否则抢掉钉住手势）",
+              singleTaps.describe)
+        check(singleTaps.all.count == 1,
+              "singleSessionHUD 只有一个跳转热区（详情块）",
+              "实际 \(singleTaps.all.count) 处")
+
+        check(body.contains(".onTapGesture { openPrimarySession() }"),
+              "详情块点它就跳到该对话",
+              body.contains(".onTapGesture") ? "有手势但不是 openPrimarySession" : "函数体内没有任何 onTapGesture")
+        // contentShape 必须在，否则 padding 出来的空白收不到点击
+        check(body.contains(".contentShape(Rectangle())"),
+              "热区配了 contentShape（否则 padding 出的空白点不到）")
+        check(body.contains("点它即跳转"),
+              "详情块注释说明了「点它即跳转」",
+              "注释被改动过，意图丢了")
+
+        // 多会话：每行可点 + 底部统计行跳主会话
+        check(src.contains("state.onOpenSession?(s)"),
+              "多会话的行可点（每行跳各自的对话）")
+
+        // 整块可点同样会抢掉钉住手势；唯一例外是底部统计行 ——
+        // 它显示的就是主会话指标，点它跳主会话不歧义。
+        let multiBody = Self.bodyOf("private var multiSessionHUD: some View", in: src)
+        let multiTaps = Self.tapScan(multiBody)
+        check(multiTaps.wrapsPanel == false,
+              "multiSessionHUD 没有做成整块可点（会抢掉钉住手势）",
+              multiTaps.describe)
+        check(multiTaps.all.count == 1,
+              "多会话只有底部统计行这一个跳转热区",
+              "实际 \(multiTaps.all.count) 处")
+
+        // 折叠态的「点一下 = 钉住」必须还在
+        check(src.contains(".onTapGesture { state.pinned.toggle() }"),
+              "折叠态「点一下钉住」的手势仍在（别被整块可点吃掉）")
+    }
+
+    /// 扫一段视图代码里的 onTapGesture，判断它是不是「整块可点」。
+    ///
+    /// 「整块可点」的特征：onTapGesture 挂在 VStack 的**收尾链**上
+    /// （那行 maxWidth/maxHeight 的 frame 之后），也就是整个面板都被它接管；
+    /// 挂在某个子元素上则是正常热区。
+    private struct TapScan {
+        let all: [Int]        // 所有 onTapGesture 的行号（相对片段起点）
+        let wrapsPanel: Bool  // 是否有任意一个落在 VStack 收尾之后
+        let closingLine: Int
+
+        var describe: String {
+            let list = all.isEmpty ? "无" : all.map(String.init).joined(separator: ",")
+            let tail = all.filter { $0 > closingLine }
+            let tailText = tail.isEmpty ? "无" : tail.map(String.init).joined(separator: ",")
+            return "onTapGesture 在第 \(list) 行，VStack 收尾在第 \(closingLine) 行，落在收尾之后的有第 \(tailText) 行"
+        }
+    }
+
+    private static func tapScan(_ fragment: String) -> TapScan {
+        let lines = fragment.components(separatedBy: "\n")
+        var closing = -1
+        var taps: [Int] = []
+        for (i, line) in lines.enumerated() {
+            if line.contains(".frame(maxWidth: .infinity, maxHeight: .infinity") {
+                closing = i
+            }
+            if line.contains(".onTapGesture") {
+                taps.append(i)
+            }
+        }
+        let wrapped = taps.contains { $0 > closing }
+        return TapScan(all: taps, wrapsPanel: wrapped, closingLine: closing)
+    }
+
+    /// 截出某个声明的**函数体**（大括号配平）。
+    ///
+    /// 坑：SwiftUI 的计算属性长这样
+    /// ```swift
+    /// private var singleSessionHUD: some View {
+    ///     VStack { ... }
+    ///         .frame(...)
+    /// }
+    /// ```
+    /// 签名里那个 `some View` **后面**的 `{` 才是函数体的开始 ——
+    /// 如果从签名的 `{` 之前开始数配平，会被 `VStack {` 的闭合提前打断，
+    /// 截出来的东西支离破碎（实测截到了文件别处的方法）。
+    /// 所以先跳过签名、找到第一个 `{`，从它之后开始数。
+    private static func braceBody(from start: String.Index, in src: String) -> String {
+        let rest = String(src[start...])
+        guard let open = rest.firstIndex(of: "{") else { return "" }
+        let afterOpen = rest.index(after: open)
+        var depth = 1
+        var i = 0
+        let tail = String(rest[afterOpen...])
+        for ch in tail {
+            defer { i += 1 }
+            if ch == "{" { depth += 1 }
+            else if ch == "}" {
+                depth -= 1
+                if depth == 0 {
+                    let cut = tail.index(tail.startIndex, offsetBy: i)
+                    return String(tail[..<cut]) + "}"
+                }
+            }
+        }
+        return tail
+    }
+
+    private static func bodyOf(_ signature: String, in src: String) -> String {
+        guard let r = src.range(of: signature) else { return "" }
+        return braceBody(from: r.lowerBound, in: src)
     }
 
     // MARK: - 排序
@@ -262,13 +406,13 @@ final class SessionSelfTest {
 
     // MARK: - 断言
 
-    private func check(_ ok: Bool, _ msg: String) {
+    private func check(_ ok: Bool, _ msg: String, _ detail: String = "") {
         if ok {
             passed += 1
             print("  ✓ \(msg)")
         } else {
             failed += 1
-            print("  ✗ \(msg)")
+            print("  ✗ \(msg)" + (detail.isEmpty ? "" : "  → " + detail))
         }
     }
 }

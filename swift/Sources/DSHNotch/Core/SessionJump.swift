@@ -177,21 +177,29 @@ enum SessionJump {
 
     /// 跳转到某个会话。
     ///
-    /// 优先走插件桥（一步到位，不需要辅助功能权限）；桥不可用时降级为
-    /// 「置前 + 复制标题 +（有权限则）⌘K ⌘V」。
+    /// 顺序很讲究：**先置前，再投桥**。
     ///
-    /// 副作用（有意为之）：降级路径会把 DSH 拉到前台、并覆盖剪贴板。
+    /// - 置前（`dsh://open`）走 LaunchServices，DSH 已在跑时是毫秒级，
+    ///   顺带把窗口从后台捞到前台。**DSH 在后台时这一步是唯一管用的**，
+    ///   因为 `openSession` 只换视图、不管窗口焦点（宿主文档原话：
+    ///   *"synchronously replaces the owned `mainView` reference"*）。
+    /// - 投桥让渲染进程切到指定会话。桥通 → 一步到位；桥不通 → 下面的降级。
+    ///
+    /// 副作用（有意为之）：降级路径会覆盖剪贴板。
     @discardableResult
     static func open(_ entry: SessionEntry) -> Outcome {
-        // 1) 首选：交给插件桥。请求极快，不阻塞主线程
+        // 1) 置前 DSH —— 无论走不走桥都要做，后台点击时全靠它
+        let activated = NSWorkspace.shared.open(dshOpenURL)
+
+        // 2) 首选：交给插件桥直接切会话。
+        //    放在置前之后，是因为 openSession 只改视图；窗口先到前台，
+        //    用户看到的才是「已经切好的那个会话」，而不是切完再被拉过来。
         if postToBridge(sessionId: entry.id, title: entry.label) {
             return .bridged(sessionId: entry.id)
         }
 
-        // 2) 降级：官方唯一入口置前 + 标题进剪贴板
+        // 3) 降级：官方入口 + 标题进剪贴板 +（有权限则）⌘K ⌘V
         let text = clipboardText(for: entry)
-        let activated = NSWorkspace.shared.open(dshOpenURL)
-
         let pb = NSPasteboard.general
         pb.clearContents()
         let copied = pb.setString(text, forType: .string)
