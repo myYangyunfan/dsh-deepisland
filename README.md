@@ -23,12 +23,18 @@
 git+https://github.com/myYangyunfan/dsh-deepisland.git
 ```
 
-### 2. 双击 `scripts/setup.command`（**这步不能省**）
+### 2. 补登记：双击 `scripts/setup.command`（**这步不能省**）
 
 从仓库下载 zip 解压出来，双击其中的 `scripts/setup.command`。
 
 macOS 会用终端打开它并自动完成登记，跑完按任意键关窗即可。
 它会自己认出 DSH 在跑哪个 profile，不用你填任何东西。
+
+> **已经有 app 的话，有更省事的办法**：点菜单栏图标 →
+> **「⚠️ 插件未启用 · 点此修复…」**。它只在真需要时出现，
+> 会解释状况、让你先退出 DSH（否则退出时会把我们的修改盖掉）、
+> 改前自动备份、写完自证，最后提示重启。
+> 那一项做完之后会自动消失。
 
 <details>
 <summary><b>为什么不能省这一步？</b>（可以展开看）</summary>
@@ -46,7 +52,7 @@ macOS 会用终端打开它并自动完成登记，跑完按任意键关窗即�
 跑完自己核对结果，失败才回退到手改 manifest。
 </details>
 
-### 3. 重启 DeepSeek Harness
+### 3. 重启 DeepSeek Harness### 3. 重启 DeepSeek Harness
 
 退出应用再打开（不是关窗口）。
 

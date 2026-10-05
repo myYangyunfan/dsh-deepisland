@@ -68,6 +68,16 @@ enum DSHNotchMain {
             exit(test.run() ? 0 : 1)
         }
 
+        // 自检模式：安装向导（备份 / 原子替换 / 自证 / 幂等）
+        //
+        // 🔴 这套会**改写 profile 的 package.json**，自检里必须指向沙箱
+        // 目录（InstallGuide.profilesDirOverride），否则会搅了用户真实配置。
+        if CommandLine.arguments.contains("--self-test-guide") {
+            _ = NSApplication.shared
+            let test = InstallGuideSelfTest()
+            exit(test.run() ? 0 : 1)
+        }
+
         // 自检模式：配置读写的离线语义（默认值 / 坏文件 / 缓存失效 / 白名单）
         //
         // 必须在沙箱路径上跑，所以放在 IslandConfigSelfTest 内部改写 storeURL，
@@ -321,6 +331,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        // 安装向导：**只在真需要引导时才出现**。
+        //
+        // 平时不占菜单位置（这是绝大多数时候的状态）；
+        // 装了插件但没登记时，它是我们唯一能触达的引导位
+        // （DSH 设置面板要插件已加载才存在，那时问题已经不存在了）。
+        switch InstallGuide.scan() {
+        case .needsFix(let st):
+            menu.addItem(.separator())
+            let fix = NSMenuItem(title: "⚠️ 插件未启用 · 点此修复…",
+                                 action: #selector(activatePlugin), keyEquivalent: "")
+            fix.target = self
+            menu.addItem(fix)
+        case .ok, .notInstalled, .noProfile:
+            break
+        }
+
         let reveal = NSMenuItem(title: "在 Finder 中显示会话文件", action: #selector(revealSession), keyEquivalent: "")
         reveal.target = self
         menu.addItem(reveal)
@@ -333,6 +359,140 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let quit = NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
         item.menu = menu
+    }
+
+    // MARK: - 安装向导
+
+    /// 菜单项「⚠️ 插件未启用 · 点此修复…」的动作。
+    ///
+    /// 流程是「解释 → 退出 DSH → 改 manifest → 提示重启」：
+    ///
+    /// **为什么必须先退出 DSH** —— 宿主自己在安装/退出时也会写 profile 的
+    /// `package.json`。我们趁它运行时改，它退出时可能用内存里的旧内容盖回去，
+    /// 表现为「提示成功了，重启后插件还是没加载」。这种"看起来成功其实没成"
+    /// 比直接失败更坏，所以宁可先让用户退出。
+    @objc private func activatePlugin() {
+        let state = InstallGuide.scan()
+        // 竞态：点开菜单之后状态变了（用户自己修好了 / 已经加载过了）
+        // 注意 `.ok(st)` 与 `.notInstalled` / `.noProfile` 要分开说 ——
+        // 后两者是完全不同的状况，别一律报"已经启用"。
+        switch state {
+        case .needsFix(let st):
+            return promptFix(st)
+        case .ok(let st):
+            let done = NSAlert()
+            done.messageText = "插件已经启用"
+            done.informativeText = """
+            profile「\(st.name)」的 dsh.profile.bundles 已包含本插件，不需要修复。
+
+            如果功能仍没反应，请重启 DeepSeek Harness。
+            """
+            done.runModal()
+            return
+        case .notInstalled:
+            let a = NSAlert()
+            a.messageText = "没有找到已安装的插件"
+            a.informativeText = """
+            扫到的 profile 里都没有 "@dsh-external/dsh-vibe-island" 这个依赖。
+
+            插件尚未安装 —— 请先在 DSH 的插件管理里用这个地址安装：
+            git+https://github.com/myYangyunfan/dsh-deepisland.git
+
+            装完再点这个菜单项，就能一键补上让它真正生效的那一步。
+            """
+            a.runModal()
+            return
+        case .noProfile:
+            let a = NSAlert()
+            a.messageText = "找不到 DSH 的 profile 目录"
+            a.informativeText = """
+            没找到 ~/.dsh/profiles/ —— 这通常意味着 DeepSeek Harness 从没启动过。
+
+            先打开一次 DSH，再回到这里。
+            """
+            a.runModal()
+            return
+        }
+    }
+
+    /// 引导修复的主流程：解释 → 退出 DSH → 改 manifest → 提示重启。
+    private func promptFix(_ st: InstallGuide.ProfileStatus) {
+        // 1) 先讲清状况与后果，让人有机会反悔
+        let ask = NSAlert()
+        ask.messageText = "插件装了，但没被加载"
+        ask.informativeText = """
+        原因：DSH 插件管理器的「安装」只写了 dependencies，
+        没有把它加进 dsh.profile.bundles —— 而 DSH 是按 bundles 顺序加载插件的。
+        （这是宿主安装路径的实现缺口，不配错。）
+
+        结果：插件管理器里显示「已安装」，但功能一点反应都没有。
+
+        我可以帮你补上这一步：改 profile 里的 package.json，
+        把 "@dsh-external/dsh-vibe-island" 加进 dsh.profile.bundles。
+
+        · 改前会自动备份原文件
+        · 改完需要重启 DeepSeek Harness 才生效
+        · 如果 DeepSeek Harness 正在运行，需要先退出它 ——
+          否则它退出时可能用旧内容覆盖掉我们的修改
+
+        当前 profile：\(st.name)
+        """
+        ask.addButton(withTitle: "退出 DSH 并修复")
+        ask.addButton(withTitle: "取消")
+        ask.addButton(withTitle: "打开 manifest")
+        // 只问一次 —— 之前误写成两次 runModal，会让用户看到同一个弹窗两次
+        switch ask.runModal() {
+        case .alertFirstButtonReturn:
+            break                                   // 继续往下走
+        case .alertThirdButtonReturn:
+            NSWorkspace.shared.open(st.manifestURL)
+            return
+        default:
+            return                                   // 取消
+        }
+
+        // 2) 退出 DSH（必须）
+        if Self.isDSHRunning() {
+            let quit = NSAlert()
+            quit.messageText = "请先退出 DeepSeek Harness"
+            quit.informativeText = """
+            DeepSeek Harness 正在运行。
+
+            请手动退出它（⌘Q，不是关窗口）后再点一次这个菜单项。
+            这是必须的：DSH 退出时会把内存里的配置写回 manifest，
+            我们趁它运行时做的修改会被盖掉。
+            """
+            quit.runModal()
+            return
+        }
+
+        // 3) 改
+        let (ok, detail) = InstallGuide.fix(st)
+        let done = NSAlert()
+        if ok {
+            done.messageText = "已登记"
+            done.informativeText = """
+            \(detail)
+
+            下一步：重新打开 DeepSeek Harness。
+            几秒后 macOS app 会自动装好，屏幕顶端出现灵动岛。
+            """
+            done.runModal()
+            NSLog("[dsh-notch] 安装向导：已补登记到 profile \(st.name)")
+        } else {
+            done.messageText = "修复失败"
+            done.informativeText = """
+            \(detail)
+
+            插件没有被修改。可以手动编辑这个文件：
+            \(st.manifestURL.path)
+
+            在 "dsh" → "profile" → "bundles" 数组里加上：
+            "@dsh-external/dsh-vibe-island"
+            """
+            done.runModal()
+            NSLog("[dsh-notch] 安装向导：修复失败 — \(detail)")
+        }
     }
 
     @objc private func showHelp() {

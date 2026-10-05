@@ -88,6 +88,13 @@ case "${1:-}" in
   cfg-test)
     echo "==> 配置自检（默认值 / 坏文件 / 缓存失效 / 白名单）"
     "$BIN" --self-test-config
+    echo
+    echo "==> 安装向导自检（备份 / 原子替换 / 自证 / 幂等）"
+    "$BIN" --self-test-guide
+    ;;
+  guide-test)
+    echo "==> 安装向导自检（备份 / 原子替换 / 自证 / 幂等）"
+    "$BIN" --self-test-guide
     ;;
   all-tests)
     echo "==> 交互自检"
