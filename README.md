@@ -136,6 +136,55 @@ DSH 在后台时若只投桥，会话确实切了，但窗口还在后台，用�
 反过来说，置前放在前面也更自然：窗口先到前台，用户看到的已经是一个切好的会话，
 而不是「切完了再被拉过来」。
 
+### 为什么设置里的开关以前「点不动」
+
+如果你曾经看到「启用灵动岛状态栏」点了没反应，那不是 UI 坏了，是**写入通道断了**。
+
+设置卡片原本只有一条写配置的路：`scope.update(...)`。而 `scope` 来自宿主的
+`configForms` 服务，它由 `@deepseek-ai/dsh-client-ui-settings` 提供 ——
+**用户可以在自己 profile 的 `cordis.patch.yml` 里把它关掉**：
+
+```yaml
+- id: ui-settings
+  name: "@deepseek-ai/dsh-client-ui-settings"
+  config:
+    enabled: false
+```
+
+那个 bundle 带首次引导流程，很多人会关掉（本机 desktop profile 就是）。
+一旦关掉，链条是这样断的：
+
+1. `bindConfigScope` 拿不到 `configForms` → 返回 `null`
+2. `updateField` 写的是 `if (scope && …) scope.update(…)` → **静默什么都不做**
+3. checkbox 是受控组件（`checked: config.enabled`），状态没变
+4. → **勾号不弹、岛不消失，也没有任何报错**
+
+现在改成三路并行，任何一路通都生效：
+
+| 通道 | 生效范围 | 说明 |
+| :--- | :--- | :--- |
+| 宿主 `configForms` | 当前 profile | 权威源，能用就用 |
+| **桥上的 `/config`** | 跨重启、DSH 升级也不丢 | 服务端落盘到 `client-config.json` |
+| `localStorage` | 本次窗口 | 桥不在时的兜底 |
+
+并且**每次改动都会在面板上显示「已保存」或失败原因** —— 不再静默失败。
+读配置时本地值是基线、宿主值覆盖它，所以宿主服务缺席时用户上次的选择依然生效。
+
+落盘走的是**白名单**（只接受已知键与类型）+ **原子替换**，因为这是本机回环上的
+HTTP 端点，同机任何进程都能调 —— 不校验就等于开了个任意写的口子。
+
+自查：
+
+```bash
+curl -s http://127.0.0.1:47311/config
+cat ~/Library/Application\ Support/DSHNotch/client-config.json
+```
+
+> 排查时踩的一个坑：日志目录里若只有旧文件，别据此断言「插件没激活」。
+> 要看**桥的 pid 有没有变** —— 改了插件代码但没重启宿主时，桥还是老进程，
+> 新加的端点会返回 `not found`。这是「代码对但没生效」的常见误判，
+> 我自己就差点据此得出错误结论。
+
 ### 点击热区的分工
 
 | 点哪里 | 折叠态 | 展开态 |

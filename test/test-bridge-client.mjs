@@ -5,6 +5,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -264,3 +265,112 @@ console.log('通过 ' + pass + ' / 失败 ' + fail);
 console.log('='.repeat(44));
 globalThis.__results = globalThis.__results || {};
 globalThis.__results.bridgeclient = { pass, fail };
+
+// ===========================================================================
+console.log('\n=== T6: 设置持久化 —— 复现并锁死「开关点不动」 ===');
+// ===========================================================================
+// 用户报「灵动岛设置里根本点不动」。真因不是 UI 坏了，而是写入通道断了：
+//   1. 设置卡片原本只通过 `scope.update(...)` 写配置；
+//   2. `scope` 来自 `configForms`，而它由 `@deepseek-ai/dsh-client-ui-settings`
+//      提供 —— 用户可以在自己 profile 的 cordis.patch.yml 里写
+//      `- id: ui-settings / config: { enabled: false }` 把它关掉
+//      （那个 bundle 带首次引导流程，很常见；本机 desktop profile 就是）；
+//   3. 拿不到 scope → `bindConfigScope` 返回 null → `if (scope && …)`
+//      **静默什么都不做**；
+//   4. checkbox 是受控组件（`checked: config.enabled`），状态不变
+//      → 勾号不弹、岛不消失，用户完全无从判断发生了什么。
+//
+// 下面断言：scope 缺席（最坏情况）时，改设置仍然
+// ① 立刻写进本地、② 读得到、③ 渲染读得到、④ 桥在时能落盘到磁盘。
+{
+  const store = new Map();
+  const prevLS = globalThis.localStorage;
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => { store.set(k, String(v)); },
+    removeItem: (k) => { store.delete(k); },
+  };
+
+  const noScope = null;
+  check('前提：scope 为 null（模拟 configForms 被 profile 关掉）', noScope === null);
+
+  const initial = mod.readScopeConfig(noScope);
+  check('无任何配置源时读到空对象（由调用方补默认值）',
+    initial && typeof initial === 'object' && Object.keys(initial).length === 0,
+    JSON.stringify(initial));
+
+  mod.writeLocalConfig({ enabled: false, placement: 'menu' });
+  const after = mod.readScopeConfig(noScope);
+  check('scope 缺席时写入立刻生效（勾号会变、岛会消失）',
+    after.enabled === false, JSON.stringify(after));
+  check('其他字段一并保存', after.placement === 'menu', JSON.stringify(after));
+
+  const withHost = mod.readScopeConfig({ getSnapshot: () => ({ enabled: true }) });
+  check('宿主配置服务的值优先于本地值（它是权威源）',
+    withHost.enabled === true, JSON.stringify(withHost));
+  check('宿主没提供的键仍取本地值（不丢用户设置）',
+    withHost.placement === 'menu', JSON.stringify(withHost));
+
+  // ---- 桥在时能落盘 ----
+  const bridge = await server.startBridge({ port: 47960, log: () => {} });
+  const put = await req(bridge.port, '/config', {
+    method: 'POST', body: { enabled: false, glowEffect: false },
+  });
+  check('POST /config 写入成功（服务端落盘通道）',
+    put.status === 200 && put.body.ok === true, JSON.stringify(put.body));
+
+  const got = await req(bridge.port, '/config');
+  check('GET /config 读回刚写的值',
+    got.body.config && got.body.config.enabled === false && got.body.config.glowEffect === false,
+    JSON.stringify(got.body.config));
+
+  const cfgFile = path.join(os.homedir(), 'Library', 'Application Support', 'DSHNotch', 'client-config.json');
+  check('配置文件真的落盘了（不是只在内存）', fs.existsSync(cfgFile), cfgFile);
+  const onDisk = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+  check('磁盘内容与接口返回一致', onDisk.enabled === false, JSON.stringify(onDisk));
+
+  // ---- 白名单：这是本机 HTTP 端点，同机任何进程都能调 ----
+  await req(bridge.port, '/config', {
+    method: 'POST', body: { evil: 'x', scale: 'not-a-number', enabled: 'yes' },
+  });
+  const afterEvil = await req(bridge.port, '/config');
+  check('未知键 evil 被忽略', afterEvil.body.config.evil === undefined, JSON.stringify(afterEvil.body.config));
+  check('类型错的 scale 被忽略', typeof afterEvil.body.config.scale !== 'string', JSON.stringify(afterEvil.body.config));
+  check('类型错的 enabled（字符串）被忽略',
+    typeof afterEvil.body.config.enabled === 'boolean', JSON.stringify(afterEvil.body.config));
+  check('原型没被污染', {}.polluted === undefined, String({}.polluted));
+
+  const broken = await req(bridge.port, '/config', { method: 'POST', body: '{not json' });
+  check('坏 JSON 返回 400 而不是抛错', broken.status === 400, String(broken.status));
+  const notObj = await req(bridge.port, '/config', { method: 'POST', body: [1, 2] });
+  check('非对象配置被拒', notObj.status === 400, String(notObj.status));
+
+  const leftovers = fs.readdirSync(path.dirname(cfgFile)).filter((f) => f.includes('.tmp-'));
+  check('写完没有 .tmp 残留（原子替换做对了）', leftovers.length === 0, JSON.stringify(leftovers));
+
+  await bridge.close();
+
+  try { fs.unlinkSync(cfgFile); } catch { /* 本来就不存在 */ }
+  store.clear();
+  check('清理后读到空配置', Object.keys(mod.readLocalConfig()).length === 0);
+  if (prevLS === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevLS;
+}
+
+// ===========================================================================
+console.log('\n=== T7: 源码层面锁死「不要退回单通道」 ===');
+{
+  const src = fs.readFileSync(path.join(ROOT, 'lib', 'client.js'), 'utf8');
+
+  check('updateField 不止一条写入路径（必须含本地写入）',
+    /updateField[\s\S]{0,900}writeLocalConfig/.test(src), 'updateField 里没找到 writeLocalConfig');
+  check('updateField 不再被 scope 的有无绑死',
+    !/const updateField = \(key, val\) => \{\s*\n\s*if \(scope && typeof scope\.update/.test(src),
+    '又是「只有 scope 才有反应」的老写法');
+  check('读配置时把本地值作为基线',
+    /function readScopeConfig\([\s\S]{0,600}readLocalConfig\(\)/.test(src),
+    'readScopeConfig 没有读本地配置');
+  check('启动时会去服务端拉回已保存的配置', /loadConfig\(scope\)/.test(src), '没找到启动拉取配置的调用');
+  check('设置面板有可见的保存反馈', /setSaveNote/.test(src) && /saveNote/.test(src), '没有保存反馈');
+  check('无 scope 时不再谎称「使用默认配置」',
+    !/未取得配置服务，使用默认配置（设置项不持久化）/.test(src), '那句误导性的告警还在');
+}

@@ -87,7 +87,16 @@ check('优先使用 ctx.configForms.get', /ctx\.configForms\s*&&\s*typeof ctx\.c
 check('保留 settingsScope 兼容回退', /ctx\.settingsScope\s*&&\s*typeof ctx\.settingsScope\.bind/.test(src));
 check('有 normalizeScope 统一形态', /function normalizeScope/.test(src));
 check('有 readScopeConfig 安全读取', /function readScopeConfig/.test(src));
-check('无配置服务时降级不崩', /未取得配置服务，使用默认配置/.test(src));
+// 无配置服务时必须有提示。
+//
+// ⚠️ 文案别改回「使用默认配置（设置项不持久化）」—— 那是误导：
+// 用户会以为自己的设置丢了，而实际上插件已经能自己保存（见
+// client.js 的 saveConfig：桥在则落盘、不在则 localStorage）。
+// 那句话是「开关点不动」这个 bug 的帮凶之一：用户看不到真实原因。
+check('无配置服务时给出提示', /未取得配置服务/.test(src));
+check('提示文案不说「设置项不持久化」（那是误导）',
+  !/未取得配置服务，使用默认配置（设置项不持久化）/.test(src),
+  '那句误导性的告警还在');
 
 console.log('\n=== H4: 运行期行为（用真实宿主形态的 ctx 驱动）===');
 // 桩 window/document 以便执行 client.js
