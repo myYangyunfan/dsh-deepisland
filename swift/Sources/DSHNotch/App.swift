@@ -336,6 +336,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 平时不占菜单位置（这是绝大多数时候的状态）；
         // 装了插件但没登记时，它是我们唯一能触达的引导位
         // （DSH 设置面板要插件已加载才存在，那时问题已经不存在了）。
+        //
+        // ⚠️ `.notInstalled`（压根还没装）**故意不放菜单项**：
+        // 那种情况下 app 往往还没被装上（app 是插件装的），
+        // 菜单里挂个"请去装插件"没人会看见，白占位置。
+        // 那一段引导写进 README 与 `.notInstalled` 的弹窗里就够了。
         switch InstallGuide.scan() {
         case .needsFix(let st):
             menu.addItem(.separator())
@@ -390,15 +395,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             done.runModal()
             return
         case .notInstalled:
+            // 菜单项在这个状态下不出现，所以这段只能由「状态在打开菜单后
+            // 变成 .notInstalled」这种竞态触发到。留着是为了有个兜底说法，
+            // 别把"没装"说成"已启用"。
             let a = NSAlert()
             a.messageText = "没有找到已安装的插件"
             a.informativeText = """
             扫到的 profile 里都没有 "@dsh-external/dsh-vibe-island" 这个依赖。
 
-            插件尚未安装 —— 请先在 DSH 的插件管理里用这个地址安装：
+            插件尚未安装 —— 请在 DSH 的插件管理里用这个地址安装：
             git+https://github.com/myYangyunfan/dsh-deepisland.git
 
-            装完再点这个菜单项，就能一键补上让它真正生效的那一步。
+            ⚠️ 装完的对话框里有个「立即启用」按钮 —— 点它。
+            不点的话插件不会被加载，功能毫无反应（很容易直接关掉就忘了）。
             """
             a.runModal()
             return
@@ -421,13 +430,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let ask = NSAlert()
         ask.messageText = "插件装了，但没被加载"
         ask.informativeText = """
-        原因：DSH 插件管理器的「安装」只写了 dependencies，
+        原因：DSH 插件管理器的「安装」只写了dependencies，
         没有把它加进 dsh.profile.bundles —— 而 DSH 是按 bundles 顺序加载插件的。
-        （这是宿主安装路径的实现缺口，不配错。）
+
+        （不是配错。安装完成的对话框里其实有个「立即启用」按钮，
+          点它就等于完成这一步。你大概是装完直接关了对话框。）
 
         结果：插件管理器里显示「已安装」，但功能一点反应都没有。
 
-        我可以帮你补上这一步：改 profile 里的 package.json，
+        我可以帮你补上：改 profile 里的 package.json，
         把 "@dsh-external/dsh-vibe-island" 加进 dsh.profile.bundles。
 
         · 改前会自动备份原文件

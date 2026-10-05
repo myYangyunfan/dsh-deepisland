@@ -11,7 +11,7 @@
 
 ---
 
-## 📦 新用户：三步装好
+## 📦 新用户：这样装
 
 > 详细说明在 [`swift/INSTALL.md`](./swift/INSTALL.md)（含不装插件的纯手动路线）。
 
@@ -23,36 +23,66 @@
 git+https://github.com/myYangyunfan/dsh-deepisland.git
 ```
 
-### 2. 补登记：双击 `scripts/setup.command`（**这步不能省**）
+### 2. 装完后点「立即启用」（**多数情况下不用做**）
 
-从仓库下载 zip 解压出来，双击其中的 `scripts/setup.command`。
+装完插件，DSH 会弹一个对话框，**上面有个「立即启用」按钮** —— 点它，就完成了。
 
-macOS 会用终端打开它并自动完成登记，跑完按任意键关窗即可。
-它会自己认出 DSH 在跑哪个 profile，不用你填任何东西。
+<div align="center">
 
-> **已经有 app 的话，有更省事的办法**：点菜单栏图标 →
-> **「⚠️ 插件未启用 · 点此修复…」**。它只在真需要时出现，
-> 会解释状况、让你先退出 DSH（否则退出时会把我们的修改盖掉）、
-> 改前自动备份、写完自证，最后提示重启。
-> 那一项做完之后会自动消失。
+```
+┌─ 装  @dsh-external/dsh-vibe-island  ─────────┐
+│                                            │
+│   ✔ 已安装                                 │
+│                                            │
+│         [ 立即启用 ]  ← 点这个              │
+│                                            │
+│         [ 关闭 ]                            │
+└────────────────────────────────────────────┘
+```
+
+</div>
+
+> **点了「立即启用」就直接跳到第 3 步。** 没点、或者点了之后功能没反应，
+> 才需要下面的补登记。
 
 <details>
-<summary><b>为什么不能省这一步？</b>（可以展开看）</summary>
+<summary><b>需要补登记时怎么做（两条路，选一条）</b>（可以展开看）</summary>
 
-插件管理器的「安装」只做了一半 —— 它跑 `pnpm add`，只写 `dependencies`，
-**不碰 `dsh.profile.bundles`**。而宿主的加载顺序是「按 `dsh.profile.bundles` 顺序叠」，
-所以装完插件它压根不会被加载。
+**A. 已经有 app（老用户升级、误删重装、手工装过）**
 
-更麻烦的是宿主**一点提示都没有**：插件管理器里照样显示「已安装」，功能毫无反应。
-追到源码，确切位置找到了：插件管理器的界面调用是
-`installBundle(spec, { enabled: false })`，而这个实现里写着
-`if (options?.enabled !== false) await this.selectBundle(name, true)` ——
-`enabled: false` 让它**跳过了写 bundles 那一步**。官方 CLI 不传这个参数，所以会自动登记。
+点菜单栏图标→ **「⚠️ 插件未启用 · 点此修复…」**。
+它只在真需要时出现，会解释状况、让你先退出 DSH（否则退出时会把改动盖掉）、
+改前自动备份、写完自证、最后提示重启。做完那一项自动消失。
 
-界面那边其实有个**「立即启用」按钮**（装完的对话框里，`t("installEnableNow")`），
-点它就等于补登记 —— 大多数人是装完直接关了对话框，所以没点上。
+**B. 从仓库下载 zip**
 
-**如果你在插件页装完看到「立即启用」，点它就够了，不用第二步。**
+解压后双击 `scripts/setup.command`。macOS 会用终端打开并自动完成登记，
+跑完按任意键关窗。它会自己认出 DSH 在跑哪个 profile，不用你填任何东西。
+
+</details>
+
+<details>
+<summary><b><b>为什么会有这个坑？</b>（可以展开看）</summary>
+
+插件管理器的「安装」只做了一半—— 它跑 `pnpm add`，只写 `dependencies`，
+**不碰 `dsh.profile.bundles`**。而宿主按 `bundles` 顺序叠加载树，
+所以装完不点启用，插件压根不会被加载，而且宿主**一点提示都没有**
+（插件管理器里照样显示「已安装」）。
+
+追到源码，确切位置是这个：
+
+```js
+// 插件管理器服务端
+if (options?.enabled !== false)
+  await this.selectBundle(name, true);   // ← 真正写 bundles 的那一步
+```
+
+界面的调用是 `installBundle(spec, { enabled: false, ... })`，
+`enabled: false` 让它**跳过了那一步**。官方 CLI 不传这个参数，所以会自动登记
+（实测 `dsh plugin add` 装完 bundles 就写好了）。
+
+界面上本来就有「立即启用」按钮，它调的正是 `setBundleEnabled(name, true)` ——
+**所以这不是缺功能，是按钮容易被忽略**。大多数人装完直接关了对话框。
 
 用 `dsh --profile X --dump-config` 对比过两种状态（同一份 `package.json`、
 同一个 `node_modules`，**只改 `bundles`**）：
@@ -67,6 +97,7 @@ macOS 会用终端打开它并自动完成登记，跑完按任意键关窗即�
 `setup.command` 优先调官方 CLI 的完整 cycle（`remove` → `add`，
 因为宿主 CLI 内部的 bundles 同步只处理**本次新增**的依赖），
 跑完自己核对结果，失败才回退到手改 manifest。
+
 </details>
 
 ### 3. 重启 DeepSeek Harness

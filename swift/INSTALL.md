@@ -3,8 +3,8 @@
 这份说明面向「**要把 DSH Notch 装到自己 Mac 上**」的人。
 如果你是本仓库作者、机器上已经有源码，`./build.sh install` 一行就够，不用看这里。
 
-> **只想用不想折腾？** 仓库根 [`README.md`](../README.md) 有一份「新用户三步装好」：
-> 插件页输入地址 → 双击 `scripts/setup.command` → 重启 DSH。
+> **只想用不想折腾？** 仓库根 [`README.md`](../README.md) 有一份简版：
+> 插件页输入地址 → **点「立即启用」** → 重启 DSH。
 > app 会自动装好，什么都不用手动做。
 >
 > **什么时候才需要看这份文档**：
@@ -26,21 +26,35 @@
 
 ### 但「装上插件」不等于「插件已加载」
 
-插件必须先登记进 profile 的 `dsh.profile.bundles` 才会被加载，
-而**插件管理器的安装只跑 `pnpm add`、只写 `dependencies`，不会写这个列表**。
-不登记的后果是**毫无提示**：插件管理器里照样显示「已安装」，但功能一点反应都没有。
+插件必须先登记进 profile 的 `dsh.profile.bundles` 才会被加载。
 
-**补这一步：双击仓库里的 `scripts/setup.command`**（自己会找 profile、自己备份、
-出错会解释），或者在终端里跑：
+**好消息：装完的对话框里有个「立即启用」按钮，点它就完成了。**
+
+插件管理器的界面调用是 `installBundle(spec, { enabled: false })`，
+而该实现里写着：
+
+```js
+if (options?.enabled !== false)
+  await this.selectBundle(name, true);   // ← 真正写 bundles 的那一步
+```
+
+`enabled: false` 让它跳过了那一步 —— 所以装完不点启用，
+插件管理器里照样显示「已安装」，但**功能毫无反应**。
+（官方 CLI `dsh plugin add` 不传这个参数，会自动登记。）
+
+**没点「立即启用」时的两条补登记路，选一条：**
+
+**A. 已经有 app** → 菜单栏图标 → 「⚠️ 插件未启用 · 点此修复…」。
+自己会解释状况、让你先退出 DSH、备份、改完自证。
+
+**B. 从仓库下载 zip** → 双击 `scripts/setup.command`，
+或在终端里跑：
 
 ```bash
 node "$HOME/.dsh/profiles/desktop/node_modules/@dsh-external/dsh-vibe-island/scripts/register-bundle.mjs"
 ```
 
-**然后重启 DSH Desktop。** 详见
-[`../README.md`](../README.md) 的
-「[还差一步：把插件登记进 dsh.profile.bundles](../README.md#-还差一步把插件登记进-dshprofilebundles)」
-—— 那里有宿主为什么这么设计的原文依据。
+**然后重启 DSH Desktop。**
 
 ### 什么时候还是得手动装 app
 
