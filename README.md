@@ -23,6 +23,21 @@
 git+https://github.com/myYangyunfan/dsh-deepisland.git
 ```
 
+> ⚠️ **要完整地址，不能只写仓库名。**
+>
+> 写成 `myYangyunfan/dsh-deepisland` 或 `github.com/myYangyunfan/dsh-deepisland`
+> 会被当成 **npm 包名**去 registry 找 —— 那里没有这个包，必然失败。
+>
+> 下面这几种都能识别，但**建议照抄上面那条**：
+>
+> | 写法 | 能不能装 |
+> | :--- | :--- |
+> | `git+https://github.com/myYangyunfan/dsh-deepisland.git` | ✅ 推荐 |
+> | `https://github.com/myYangyunfan/dsh-deepisland.git` | ✅ |
+> | `git+https://github.com/myYangyunfan/dsh-deepisland`（无 `.git`） | ✅ |
+> | `myYangyunfan/dsh-deepisland` | ❌ 当成 npm 包 |
+> | `github.com/myYangyunfan/dsh-deepisland` | ❌ 当成 npm 包 |
+
 ### 2. 装完后点「立即启用」（**多数情况下不用做**）
 
 装完插件，DSH 会弹一个对话框，**上面有个「立即启用」按钮** —— 点它，就完成了。
@@ -102,9 +117,18 @@ if (options?.enabled !== false)
 
 ### 3. 重启 DeepSeek Harness
 
-退出应用再打开（不是关窗口）。
+**退出应用再打开**（不是关窗口 —— 关窗口 DSH 还活着，插件不会重新启动）。
 
-重启后插件会**自动把 macOS app 装好**（下载 → 校验 SHA256 → 解压 → 安装 → 启动），
+为什么必须重启：那个 macOS app 是**插件自己装**的 ——
+只有插件被加载、跑起来，才会去下载安装 app。
+不重启，插件根本没运行过，app 也就没装。
+
+重启后你会看到日志里这几行（说明正在装）：
+
+```
+[dsh-vibe-island] install: present — /Applications/DSHNotch.app
+```
+
 几秒后屏幕顶端的刘海就出现了。
 
 ### 确认装好了
