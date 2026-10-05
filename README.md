@@ -341,10 +341,32 @@ git+https://github.com/myYangyunfan/dsh-deepisland.git
 无任何自动合并）。所以装完插件，它在 `dependencies` 里躺着，却不在 `bundles` 里 ——
 **树按 `bundles` 顺序叠，它压根不会被加载。**
 
-> 注意区分：宿主确实有个 `reportSkippedBundles` 会往 stderr 打印跳过原因，
+#### 这是宿主 UI 路径的实现缺口，不是配置问题
+
+追到源码了。宿主里唯一会写 `bundles` 的函数是 `reconcileProfilePlugins`
+（内部会调 `writeProfileBundles`），而在整个 asar 里它只出现 **2 次**：
+一次定义、一次在 export 列表里 —— **插件管理器的 `installBundle` 路径压根没调用它**。
+
+而官方 CLI 走的是另一条自己实现的代码（`reconcile` + `saveManifest`），**会**写。
+所以同一件事，CLI 能做、插件页做不到 —— 差的是代码路径，不是配置。
+
+还有个细节值得记（它也解释了为什么直接 add 没用）：
+
+```js
+for (const name of dependencies) {
+  if (beforeDeps.has(name)) continue;   // 只处理「本次新增」的依赖
+  …
+  bundles.push(name);
+}
+```
+
+**同步只覆盖「本次新增」的依赖。** 对一个「已在 dependencies、但不在 bundles」的插件
+直接 `add`，pnpm 会答 `Already up to date`，同步那一步根本不执行。
+所以 `setup.command` 走的是官方完整 cycle：`remove` → `add`。
+
+> 顺带更正另一处：宿主确实有 `reportSkippedBundles` 会往 stderr 打印跳过原因（实测有输出），
 > 但它只列**「在 bundles 里、却加载失败」**的条目。本插件是**压根不在 bundles 里**，
-> 连「被跳过」都算不上 —— 所以既不在跳过列表里，也不影响别的 bundle，
-> **一点提示都没有**。
+> 连「被跳过」都算不上 → 不在跳过列表、不影响别的 bundle、**一点提示都没有**。
 
 #### 怎么补这一步
 
@@ -394,7 +416,10 @@ profile 名会从 DSH 宿主进程的命令行里自动读出来，不用手填�
    实测 `prepare` 脚本自报「成功登记」，但它写进 manifest 的那一项
    被 pnpm 随后的写入盖掉了，bundles 里根本没有。
 
-两条叠起来这条路彻底没戏。宿主侧也没有别的钩子：
+两条叠起来这条路彻底没戏（但**官方 CLI 那条是通的**，见上 ——
+它不依赖 `prepare`，而是在 pnpm 跑完之后自己写 manifest）。
+
+宿主侧没有别的钩子：
 `normalizeShippedProfile` 只在 profile 仍是出厂默认组合时重置 bundles（与装新插件无关）；
 `dsh --profile desktop …` 被 Electron 独占，CLI 进不去这个 profile。
 

@@ -173,6 +173,23 @@ console.log('\n=== T5: 登记脚本（用户唯一要做的动作）===');
 
   if (fs.existsSync(s2)) {
     const sh = fs.readFileSync(s2, 'utf8');
+    // 脚本必须走官方 CLI 的 remove → add cycle，而不是手改 JSON。
+    // 原因：宿主 CLI 只同步「本次新增」的依赖（源码里
+    // `for (const name of dependencies) { if (beforeDeps.has(name)) continue; … }`），
+    // 对「已在 dependencies、不在 bundles」的插件直接 add 会被
+    // "Already up to date" 跳过。先 remove 让它变成未安装，add 才是真新增。
+    if (fs.existsSync(s2)) {
+      const sh2 = fs.readFileSync(s2, "utf8");
+      check("setup.command 调用宿主官方 CLI（官方支持的增删入口）",
+        sh2.includes("plugin --profile") && sh2.includes("add"), "没找到 CLI 调用");
+      check("setup.command 先 remove 再 add（绕过 Already up to date 跳过）",
+        /remove[\s\S]{0,400}add/.test(sh2) || /remove.*\n.*add/.test(sh2),
+        "缺少 remove → add 的顺序");
+      check("setup.command 登记后自己核对结果（CLI 不会报告 bundles 是否同步）",
+        /in_bundles/.test(sh2), "没有核对逻辑");
+      check("CLI 失败时有兜底（直接改 manifest）", sh2.includes("bak-register"));
+    }
+
     check('setup.command 是可执行的（双击才会跑）',
       (fs.statSync(s2).mode & 0o111) !== 0,
       'mode=' + (fs.statSync(s2).mode & 0o777).toString(8));
