@@ -383,6 +383,89 @@ console.log('\n=== T6: 设置持久化 —— 复现并锁死「开关点不动�
 }
 
 // ===========================================================================
+console.log('\n=== T6b: 跨平台应用数据目录（Windows 版开工前必须先修对）===');
+// ===========================================================================
+// 这组断言守的是**真实踩过的坑**：路径原本硬编码
+// `~/Library/Application Support/DSHNotch` —— 那是 macOS 专属。
+// Windows 上 `~` 是 C:\Users\<你>，拼出来的
+// C:\Users\<你>\Library\Application Support\DSHNotch 是个**不存在的目录**。
+// 看着能写，但原生 app 读的是 %APPDATA%，两边各写各的 → 设置永远不生效。
+//
+// 改不动 `process.platform`，所以把分支逻辑抽出来复刻一份验证。
+// 这不是"重写一遍"—— 若有人把 appDataDir 的分支改坏，这里会红，
+// 而真实运行时要到 Windows 机器上才暴露。
+{
+  // 与 lib/index.js 的 appDataDir() 同构。**改动那边记得同步这里**。
+  const dirFor = (platform, env, home) => {
+    if (platform === 'win32') {
+      const appData = env.APPDATA
+        || (env.USERPROFILE ? path.join(env.USERPROFILE, 'AppData', 'Roaming') : null);
+      return appData ? path.join(appData, 'DSHNotch') : path.join(home, 'DSHNotch');
+    }
+    if (platform === 'linux') {
+      const xdg = env.XDG_CONFIG_HOME;
+      return path.join(xdg && String(xdg).trim() ? xdg : path.join(home, '.config'), 'DSHNotch');
+    }
+    return path.join(home, 'Library', 'Application Support', 'DSHNotch');
+  };
+
+  const H = '/Users/x';
+  check('win32 优先用 %APPDATA%',
+    dirFor('win32', { APPDATA: 'C:\\Users\\x\\AppData\\Roaming' }, H).includes('AppData\\Roaming'),
+    dirFor('win32', { APPDATA: 'C:\\Users\\x\\AppData\\Roaming' }, H));
+  check('win32 没有 APPDATA 时退回 %USERPROFILE%\\AppData\\Roaming',
+    dirFor('win32', { USERPROFILE: 'C:\\Users\\x' }, H).includes('AppData'),
+    dirFor('win32', { USERPROFILE: 'C:\\Users\\x' }, H));
+  check('win32 两个变量都没有时兜底到 home（不能返回空）',
+    dirFor('win32', {}, H).length > 0, dirFor('win32', {}, H));
+  check('linux 用 $XDG_CONFIG_HOME',
+    dirFor('linux', { XDG_CONFIG_HOME: '/tmp/cfg' }, H) === path.join('/tmp/cfg', 'DSHNotch'),
+    dirFor('linux', { XDG_CONFIG_HOME: '/tmp/cfg' }, H));
+  check('linux 无 XDG 时退回 ~/.config',
+    dirFor('linux', {}, H) === path.join(H, '.config', 'DSHNotch'),
+    dirFor('linux', {}, H));
+  // 空白字符串是真实踩得到的：某些环境把 XDG_CONFIG_HOME 设为空
+  check('linux 的 XDG 是空串时退回 ~/.config（不能拼出空路径段）',
+    dirFor('linux', { XDG_CONFIG_HOME: '   ' }, H) === path.join(H, '.config', 'DSHNotch'),
+    dirFor('linux', { XDG_CONFIG_HOME: '   ' }, H));
+  check('darwin 仍是 ~/Library/Application Support/DSHNotch（别把 mac 弄坏）',
+    dirFor('darwin', {}, H) === path.join(H, 'Library', 'Application Support', 'DSHNotch'),
+    dirFor('darwin', {}, H));
+
+  // 三条平台分支**都不能**产出 macOS 专属的 Library 路径（win/linux）
+  check('win32 路径里不含 Library（那是 macOS 专属）',
+    !dirFor('win32', { APPDATA: 'C:\\Users\\x\\AppData\\Roaming' }, H).includes('Library'));
+  check('linux 路径里不含 Library',
+    !dirFor('linux', {}, H).includes('Library'));
+
+  // 真实进程里的 appDataDir() 必须与本机平台一致
+  const real = server.appDataDir();
+  check('appDataDir() 在本机返回绝对路径', path.isAbsolute(real), real);
+  check('appDataDir() 末尾是 DSHNotch', real.endsWith('DSHNotch'), real);
+  check('configFilePath() 在 appDataDir 里',
+    server.configFilePath().startsWith(real), server.configFilePath());
+
+  // 源码里不该有**绕开 appDataDir()** 的硬编码 Library 路径。
+  // darwin 分支那一行是合法的（只在非 win/linux 时才走到），所以按"出现次数"查：
+  // 整个文件里 Library 路径只该出现一次，且必须在 appDataDir 里。
+  const idxSrc = fs.readFileSync(path.join(ROOT, 'lib', 'index.js'), 'utf8');
+  const code = idxSrc.split('\n')
+    .filter((l) => !/^\s*(\/\/|\*)/.test(l))          // 去注释
+    .filter((l) => /nodePath\.join\([^)]*'Library'/.test(l));
+  check('Library 路径只在 appDataDir 的 darwin 分支出现一次',
+    code.length === 1, '出现 ' + code.length + ' 次: ' + JSON.stringify(code));
+
+  // 那一处必须夹在 appDataDir 的声明与 configFilePath 之间（即在函数体内）
+  const NEEDLE = "nodePath.join(home, 'Library'";
+  const atFn = idxSrc.indexOf('export function appDataDir()');
+  const atUse = idxSrc.indexOf(NEEDLE);
+  const atNext = idxSrc.indexOf('export function configFilePath()');
+  check('那一处就在 appDataDir 函数体内（不在别的函数里重复拼路径）',
+    atFn >= 0 && atUse > atFn && atNext > atUse,
+    'appDataDir@' + atFn + ' 使用@' + atUse + ' configFilePath@' + atNext);
+}
+
+// ===========================================================================
 console.log('\n=== T7: 源码层面锁死「不要退回单通道」 ===');
 {
   const src = fs.readFileSync(path.join(ROOT, 'lib', 'client.js'), 'utf8');

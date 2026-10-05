@@ -1,6 +1,6 @@
 # DeepSeek Harness 刘海灵动岛 (VibeIsland)
 
-在 **macOS 屏幕顶端的物理刘海**（或 Windows 顶部）显示 DeepSeek 智能体的实时工作状态：
+在 **macOS 屏幕顶端的物理刘海**显示 DeepSeek 智能体的实时工作状态：
 思考中 / 执行工具 / 等你审批 / 几个子代理在并行。**点一下就能跳到对应的对话。**
 
 ```
@@ -80,6 +80,48 @@ curl -s http://127.0.0.1:47311/health
 > 但点对话会退回「置前 + 复制标题 + `⌘K` 粘贴」。
 
 ---
+
+## 🪟 Windows 现状
+
+**状态栏本体目前只有 macOS 版。** 这一点说清楚，免得你按 Windows 版来装结果扑空。
+
+| 能力 | macOS | Windows |
+| :--- | :--- | :--- |
+| **屏幕顶端的状态栏本体** | ✅ `DSHNotch.app`（NSPanel，物理刘海） | ❌ **没有** |
+| 插件设置面板 | ✅ | ✅（纯 DOM，跨平台） |
+| 点岛跳会话（本机桥） | ✅ | ✅（`node:http` 回环，跨平台） |
+| 缺 app 自动安装 | ✅ | ❌ 跳过（`platform !== 'darwin'` 直接返回） |
+
+### 为什么 Windows 没有了
+
+Windows 版的状态栏原本是**窗口内的 DOM 覆盖层**（`.platform-windows` 皮肤 +
+`backdrop-filter` 毛玻璃 + 右上角浮标模式）。2026-10 那次「删掉窗口内岛」
+连它一起删掉了 —— 理由对 macOS 成立（出不了 DSH 窗口、抢焦点、点不到），
+但**对 Windows 不成立**：Windows 上没有 NSPanel 的等价物，
+那个 DOM 覆盖层当时是唯一形态。
+
+这是一个已知缺口，不是设计选择。
+
+### 想要 Windows 状态栏
+
+需要另写一个 Windows 原生 app（托盘/顶栏小窗），读同一份配置
+`~/AppData/Roaming/DSHNotch/client-config.json`，数据源与 macOS 版相同
+（`~/.dsh/sessions/**/session.v4.jsonl.zstd`，纯文件读取，跨平台可行）。
+
+**它还没做。** 进度与限制会在
+[`windows/README.md`](./windows/README.md) 里持续更新。
+
+### 现在在 Windows 上能做什么
+
+装插件 + 走完登记之后：
+
+- DSH 设置 → 🏝️ 灵动岛 里能开关各项设置（这些配置照样落盘，
+  macOS 版会读到 —— 同一份文件，跨机器同步配置也自然）
+- 会话头部的 🏝️ 按钮能开关刘海（对 macOS 有效）
+- 本机桥在跑，`curl http://127.0.0.1:47311/health` 有响应
+
+但**屏幕上不会有状态栏**。
+
 
 ## ✨ 它能看到什么
 
