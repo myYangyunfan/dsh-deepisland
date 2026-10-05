@@ -67,14 +67,17 @@ check('会话 id 不在目录中', count(face(mkSnap([])), 'other') === 0);
 check('getSnapshot 抛异常 → 0', count({ list: { getSnapshot: () => { throw new Error('boom'); } } }, 'p1') === 0);
 check('entries 含 null 不崩', count(face(mkSnap([null, undefined, { kind: 'child', id: 'c1', activity: 'running' }])), 'p1') === 1);
 
-console.log('\n=== C4: showSubagentCount 配置被消费 ===');
-check('client.js 读取 config.showSubagentCount', src.includes('config.showSubagentCount'));
-check('client.js 使用 subagentCount 渲染徽章', /subagentCount > 0 && h\("div"/.test(src));
-check('CSS 含子代理徽章样式', src.includes('vibe-subagent-badge'));
+// C4 原先在这里断言「子代理徽章被渲染」「CSS 含 vibe-subagent-badge」——
+// 那属于窗口内 DOM 岛的 UI，随岛一起移除了（2026-10）。
+// 保留下面这几条：它们守的是「别把废弃写法带回来」，与岛无关。
+console.log('\n=== C4: 废弃写法没有回流 ===');
 check('不再残留 isHoveringRef', !src.includes('isHoveringRef'));
 check('不再残留 setConfig', !src.includes('setConfig'));
 check('不再 import useRef', !/useRef/.test(src));
 check('不再 import useCallback', !/useCallback/.test(src));
+check('子代理徽章 UI 随岛移除（不该再有对应渲染与样式）',
+  !/vibe-subagent-badge/.test(src) && !/config\.showSubagentCount/.test(src),
+  '窗口内岛的 UI 又出现了');
 
 console.log('\n' + '='.repeat(46));
 console.log('通过 ' + pass + ' / 失败 ' + fail);

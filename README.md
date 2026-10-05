@@ -30,21 +30,25 @@
 
 ---
 
-## 🖥️ 两套方案：窗口内插件 vs 系统级刘海
+## 🖥️ 一处状态栏：物理刘海
 
-| 方案 | 位置 | 常驻性 | 目录 |
-| :--- | :--- | :--- | :--- |
-| **DSH 插件**（本 README 主角） | DSH 窗口内 DOM 覆盖层 | 跟随 DSH 窗口 | `lib/` |
-| **DSH Notch**（原生 App） | Mac 物理刘海（NSPanel） | 系统级，切到任何 App 都可见 | [`swift/`](./swift/README.md) |
+状态栏现在**只有一处** —— macOS 屏幕顶端的物理刘海（`DSHNotch.app`，NSPanel）。
+系统级，切到任何 App 都可见。
 
-两套同时启用会在 DSH 窗口内出现「应用内中部岛 + 真实刘海岛」两个状态栏，视觉冗余。
-**只想要系统级那一个时，把插件从 profile 的 bundle 列表里摘掉即可**：
+插件（`lib/`）不再往 DSH 窗口里画东西了。它保留三件事，缺一不可：
 
-```bash
-# 编辑 ~/.dsh/profiles/desktop/package.json，从 dsh.profile.bundles 移除该插件
-#   "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
-# 依赖项可以不删（保留安装状态，随时能在插件管理里重新启用），重启 DSH 生效
-```
+| 能力 | 由谁提供 |
+| :--- | :--- |
+| 设置面板（开关物理刘海、跳转、空闲收起） | 插件客户端（`lib/client.js`） |
+| 点岛上的对话 → 打开对应会话 | 插件服务端（`lib/index.js`）的本机桥 |
+| 缺 app 时自动下载安装 | 插件服务端（`lib/index.js`） |
+
+也就是说：**插件是刘海的"控制面 + 通道"，刘海本身是 app。**
+不装插件也能用（手动装 app 即可），但会失去「一步跳转」与「自动安装」。
+
+> 曾经的窗口内 DOM 岛已删除，理由见下一节。
+
+## 🗑️ 为什么删掉窗口内那个岛
 
 ### DSH Notch 怎么用（系统级那个）
 
@@ -135,6 +139,59 @@ DSH 在后台时若只投桥，会话确实切了，但窗口还在后台，用�
 
 反过来说，置前放在前面也更自然：窗口先到前台，用户看到的已经是一个切好的会话，
 而不是「切完了再被拉过来」。
+
+## 现在只有一处状态栏：物理刘海
+
+早先有两个：DSH **窗口内**的 DOM 岛（插件渲染）+ macOS **屏幕顶端**的物理刘海岛
+（独立 app）。现已把前者**整个删掉**。
+
+### 为什么删
+
+四条都是它自己的问题，与实现难度无关：
+
+1. **视觉冗余** —— 两个状态栏含义相同、位置不同，用户不知道该看哪个
+2. **出不了 DSH 窗口** —— 渲染进程只能往 `document.body` 塞 fixed 定位的 DOM，
+   所以窗口最小化或被遮挡时它跟着消失；而「随时看到智能体在干什么」正是它的唯一价值
+3. **抢焦点** —— 点它会切走 DSH 窗口焦点，打断正在输入的用户
+4. **点不到** —— 刘海被系统独占，鼠标要移到屏幕顶端才能碰到真岛；
+   窗口里那个反而更显眼，于是用户点了没反应的真岛
+
+### 设置面板现在控制的是物理刘海
+
+面板里的开关直接驱动 `DSHNotch.app`：
+
+```
+DSH 设置面板 ──POST /config──▶ 插件服务端（Node）──▶ client-config.json
+                                                              │
+                                    DSHNotch.app（Swift）◀── 读同一份 ◀┘
+```
+
+| 面板开关 | 键 | 效果 |
+| :--- | :--- | :--- |
+| 启用刘海灵动岛 | `notchEnabled` | 物理刘海显示 / 隐藏 |
+| 点对话直接跳转到该会话 | `jumpEnabled` | 关掉则退回「置前 + ⌘K 粘贴」 |
+| 空闲时自动收起 | `hideWhenIdle` | 同步到 app 的 UserDefaults |
+
+**两个方向都能改**：app 的菜单栏也有「显示/隐藏刘海灵动岛」，
+写的是同一份文件 —— 不会出现「面板说开着、菜单说关着」。
+
+app 每 250ms 检查一次配置，靠 **mtime + 文件大小** 判变化，
+没变就返回缓存值（实际只是一次 `stat`）。所以设置面板点完，刘海上的岛
+**下一拍就消失**，不用重启任何东西。
+
+### 手动开关（不依赖 DSH）
+
+```bash
+# 显示物理刘海
+curl -s -X POST -H 'content-type: application/json' \
+  -d '{"notchEnabled":true}' http://127.0.0.1:47311/config
+
+# 查当前配置
+curl -s http://127.0.0.1:47311/config
+```
+
+也可以直接点 app 的菜单栏图标 → 「隐藏刘海灵动岛」。
+
 
 ### 为什么设置里的开关以前「点不动」
 
@@ -311,9 +368,9 @@ deepisland/
 ### 测试
 
 ```bash
-node test/run.mjs all         # 235 项 Node 断言：状态机、挂载、游标性能、子代理、跳转桥两端
+node test/run.mjs all         # 265 项 Node 断言：注册链路、容错、事件扫描、子代理、跳转桥两端、配置持久化
 node test/run.mjs installdl    # 18 项：要联网，真下载 Release 并验 SHA256（约 30s，不进 all）
-node test/render-verify.mjs   # 33 项真实浏览器断言：计算样式、尺寸、双平台皮肤（产物在 test/.tmp/）
+node test/run.mjs cfg        # 配置读写的离线语义（默认值 / 坏文件 / 缓存失效 / 白名单）
 ```
 
 各套件与职责：
@@ -498,11 +555,12 @@ cat ~/Library/Application\ Support/DSHNotch/bridge.json   # 桥起来了会出�
 
 | 能力 | 由谁提供 |
 | :--- | :--- |
-| 窗口内灵动岛 | 插件客户端（`lib/client.js`） |
+| 物理刘海灵动岛本身 | `DSHNotch.app`（原生 NSPanel，[`swift/`](./swift/README.md)） |
+| 设置面板（开关刘海 / 跳转 / 空闲收起） | 插件客户端（`lib/client.js`） |
 | 点对话直接跳转 + 自动装 macOS app | 插件服务端（`lib/index.js`） |
 
-想让岛显示在**物理刘海**上而不是 DSH 窗口里，再看下一节装原生 app
-（不装插件的话，app 需要你手动装一次，见 [`swift/INSTALL.md`](./swift/INSTALL.md)）。
+不装插件也能用刘海（手动装一次 app 即可，见 [`swift/INSTALL.md`](./swift/INSTALL.md)），
+但会失去「一步跳转」与「自动安装」这两件事。
 
 ---
 

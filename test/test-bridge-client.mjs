@@ -305,10 +305,16 @@ console.log('\n=== T6: 设置持久化 —— 复现并锁死「开关点不动�
     after.enabled === false, JSON.stringify(after));
   check('其他字段一并保存', after.placement === 'menu', JSON.stringify(after));
 
-  const withHost = mod.readScopeConfig({ getSnapshot: () => ({ enabled: true }) });
-  check('宿主配置服务的值优先于本地值（它是权威源）',
-    withHost.enabled === true, JSON.stringify(withHost));
-  check('宿主没提供的键仍取本地值（不丢用户设置）',
+  // 合并顺序：**本地值覆盖宿主值**。
+  // 反过来写会有很难查的 bug：用户点了开关 → 值写进本地 →
+  // 但 scope.getSnapshot() 此刻还是旧值 → 合并后被冲回去 →
+  // 界面弹回原样，像没点上。这个 bug 真的发生过（合并顺序写反了）。
+  const withHost = mod.readScopeConfig({ getSnapshot: () => ({ enabled: true, scale: 0.8 }) });
+  check('本地值覆盖宿主值（用户刚点的不被旧快照冲回）',
+    withHost.enabled === false, JSON.stringify(withHost));
+  check('宿主有、本地没有的键仍取宿主值',
+    withHost.scale === 0.8, JSON.stringify(withHost));
+  check('宿主没提供的键取本地值（不丢用户设置）',
     withHost.placement === 'menu', JSON.stringify(withHost));
 
   // ---- 桥在时能落盘 ----

@@ -13,7 +13,7 @@
 #   ./build.sh self-test  # 注入合成 NSEvent，验证点击 → 钉住链路
 #   ./build.sh proj-test  # 在真实投影缓存 + 事件流上验证指标解析
 #   ./build.sh sess-test  # 多会话：排序 / 展开尺寸 / 停摆降级 / 真实多会话发现
-#   ./build.sh all-tests  # 上面三套自检全跑一遍
+#   ./build.sh all-tests  # 上面几套自检全跑一遍
 #   ./build.sh probes     # 编译自检探针到 .build/probes/
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -85,6 +85,10 @@ case "${1:-}" in
     echo "==> 跳转自检（深链 / 剪贴板 / 文案）"
     "$BIN" --self-test-jump
     ;;
+  cfg-test)
+    echo "==> 配置自检（默认值 / 坏文件 / 缓存失效 / 白名单）"
+    "$BIN" --self-test-config
+    ;;
   all-tests)
     echo "==> 交互自检"
     "$BIN" --self-test
@@ -97,6 +101,9 @@ case "${1:-}" in
     echo
     echo "==> 跳转自检"
     "$BIN" --self-test-jump
+    echo
+    echo "==> 配置自检（默认值 / 坏文件 / 缓存失效 / 白名单）"
+    "$BIN" --self-test-config
     ;;
   probes)
     echo "==> 编译自检探针"

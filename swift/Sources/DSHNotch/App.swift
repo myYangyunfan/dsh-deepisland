@@ -68,6 +68,16 @@ enum DSHNotchMain {
             exit(test.run() ? 0 : 1)
         }
 
+        // 自检模式：配置读写的离线语义（默认值 / 坏文件 / 缓存失效 / 白名单）
+        //
+        // 必须在沙箱路径上跑，所以放在 IslandConfigSelfTest 内部改写 storeURL，
+        // 不碰用户真实配置。
+        if CommandLine.arguments.contains("--self-test-config") {
+            _ = NSApplication.shared
+            let test = IslandConfigSelfTest()
+            exit(test.run() ? 0 : 1)
+        }
+
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -98,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pinItem: NSMenuItem?
     private var idleItem: NSMenuItem?
     private var hoverItem: NSMenuItem?
+    private var notchItem: NSMenuItem?
     private var launchItem: NSMenuItem?
 
     /// 数据轮询间隔（秒）。与插件端的 250ms 一致。
@@ -262,6 +273,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(help)
         menu.addItem(.separator())
 
+        // 显示/隐藏物理刘海本身。
+        // 写的是插件设置面板读的同一个文件（IslandConfig.save），
+        // 所以从 app 里关掉，DSH 设置里也会同步显示为关闭 —— 两边不会打架。
+        let notchToggle = NSMenuItem(title: IslandConfig.notchVisible ? "隐藏刘海灵动岛" : "显示刘海灵动岛",
+                                     action: #selector(toggleNotchIsland), keyEquivalent: "")
+        notchToggle.target = self
+        notchItem = notchToggle
+        menu.addItem(notchToggle)
+
+        menu.addItem(.separator())
+
         let toggle = NSMenuItem(title: state.pinned ? "取消钉住展开 HUD" : "钉住展开 HUD",
                                 action: #selector(toggleExpanded), keyEquivalent: "")
         toggle.target = self
@@ -377,7 +399,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleHideWhenIdle() {
         hideWhenIdle.toggle()
         idleItem?.state = hideWhenIdle ? .on : .off
+        // 同步给 DSH 设置面板（它读同一份配置）
+        var v = IslandConfig.load()
+        v.idleHide = hideWhenIdle
+        _ = IslandConfig.save(v)
         tick()
+    }
+
+    /// 显示 / 隐藏物理刘海灵动岛。
+    ///
+    /// 写的是插件设置面板读的那份配置，所以从 app 里关掉，
+    /// DSH 设置里也会同步显示为关闭 —— **两边不会各说各话**。
+    @objc private func toggleNotchIsland() {
+        let on = IslandConfig.toggleNotch()
+        syncNotchMenuItem()
+        if on {
+            presentIfNeeded()
+            tick()
+        } else {
+            state.pinned = false
+            state.isExpanded = false
+            hovering = false
+            hideIfNeeded()
+        }
+        if verbose { NSLog("[dsh-notch] 刘海灵动岛已\(on ? "显示" : "隐藏")（配置已同步给 DSH 设置面板）") }
+    }
+
+    /// 让菜单项的标题与勾选状态跟上配置。
+    private func syncNotchMenuItem() {
+        guard let item = notchItem else { return }
+        let on = IslandConfig.notchVisible
+        item.title = on ? "隐藏刘海灵动岛" : "显示刘海灵动岛"
+        item.state = on ? .on : .off
     }
 
     @objc private func toggleHoverExpand() {
@@ -608,9 +661,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyExpansion()
     }
 
+    // MARK: - 配置
+
+    /// 上一次应用过的配置，用来判断「设置面板有没有改动」。
+    private var appliedConfig: IslandConfig.Value?
+
+    /// 检查设置面板写入的配置并应用。
+    ///
+    /// - Returns: 物理刘海应该显示时返回 true；被关掉返回 false。
+    ///
+    /// 为什么在 tick 最前面：设置面板关掉之后，岛必须**立刻**消失。
+    /// 放在会话轮询之后会有最多 250ms 的延迟，而且会话解析失败时可能一直不更新。
+    ///
+    /// `IslandConfig.load()` 内部按 mtime+大小 缓存，这里每 250ms 调一次
+    /// 实际只是一次 `stat`，开销可忽略；只有真变了才走下面的应用逻辑。
+    private func applyConfigIfChanged() -> Bool {
+        let cfg = IslandConfig.load()
+        guard cfg != appliedConfig else { return IslandConfig.notchVisible }
+        appliedConfig = cfg
+
+        if verbose {
+            NSLog("[dsh-notch] 配置变化: 物理刘海=\(cfg.notchEnabled ? "开" : "关")"
+                  + " 跳转=\(cfg.jumpEnabled ? "开" : "关")"
+                  + " 空闲收起=\(cfg.idleHide ? "开" : "关")")
+        }
+        // 从 DSH 设置面板改的，菜单标题与勾选状态要跟着变
+        syncNotchMenuItem()
+
+        // 空闲收起也归设置管。UserDefaults 每次写都要落盘，
+        // 只在真变了时写（配置没变时这段根本不会进来）。
+        if hideWhenIdle != cfg.idleHide {
+            hideWhenIdle = cfg.idleHide
+        }
+
+        guard cfg.notchEnabled else {
+            // 关掉时把状态清干净：否则重新打开会看到上次的展开态/钉住残留
+            state.pinned = false
+            state.isExpanded = false
+            hovering = false
+            hideIfNeeded()
+            return false
+        }
+        return true
+    }
+
     private func tick() {
         let now = Date().timeIntervalSince1970 * 1000
         tickIndex &+= 1
+
+        // 配置优先判定：设置面板关掉物理刘海时要立刻消失，不能等会话轮询
+        if !applyConfigIfChanged() { return }
+
         // 一次轮询拿到**全部**候选会话（按关注度排序，第一个是主会话）
         let sessions = monitor.poll(now: now, tickIndex: tickIndex)
         let activity = sessions.first?.activity ?? .idle

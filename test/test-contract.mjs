@@ -93,10 +93,13 @@ check('有 readScopeConfig 安全读取', /function readScopeConfig/.test(src));
 // 用户会以为自己的设置丢了，而实际上插件已经能自己保存（见
 // client.js 的 saveConfig：桥在则落盘、不在则 localStorage）。
 // 那句话是「开关点不动」这个 bug 的帮凶之一：用户看不到真实原因。
-check('无配置服务时给出提示', /未取得配置服务/.test(src));
-check('提示文案不说「设置项不持久化」（那是误导）',
-  !/未取得配置服务，使用默认配置（设置项不持久化）/.test(src),
-  '那句误导性的告警还在');
+//
+// 岛移除后 apply() 里不再有「未取得配置服务」这句 —— 因为现在没有
+// 「降级到默认配置」这回事：设置面板照样工作，物理刘海由 app 读文件。
+// 改为断言「不再宣称会降级」。
+check('无配置服务时不再宣称「降级到默认配置」',
+  !/未取得配置服务/.test(src), '那句过时的降级告警还在');
+check('有配置源诊断输出（便于排查）', /配置源: /.test(src));
 
 console.log('\n=== H4: 运行期行为（用真实宿主形态的 ctx 驱动）===');
 // 桩 window/document 以便执行 client.js
@@ -182,7 +185,7 @@ console.log('\n=== H5: apply() 在真实 configForms 下完整挂载 ===');
   check('注册了 2 个 slot', registered.length === 2, 'got ' + registered.length);
 }
 
-console.log('\n=== H6: apply() 在无配置服务时仍能挂载（降级不阻断）===');
+console.log('\n=== H6: apply() 在无配置服务时仍能工作（不被缺服务阻断）===');
 {
   const { ctx, registered } = makeCtx(null);
   delete ctx.configForms;
@@ -192,8 +195,12 @@ console.log('\n=== H6: apply() 在无配置服务时仍能挂载（降级不阻�
   try { mod.apply(ctx); } catch (e) { threw = e.message; }
   console.warn = ow;
   check('无配置服务时 apply() 不抛异常', threw === null, threw);
-  check('给出降级告警', warns.some(w => /未取得配置服务/.test(w)), JSON.stringify(warns));
-  check('仍注册 2 个 slot（功能可用）', registered.length === 2, 'got ' + registered.length);
+  // 不再要求「降级告警」：岛移除后没有降级路径了 ——
+  // 设置面板照样工作（自己存配置），物理刘海由 app 读同一份文件。
+  check('无配置服务也不阻断功能（2 个 slot 都注册了）',
+    registered.length === 2, 'got ' + registered.length);
+  check('没有把「拿不到配置服务」当成错误（不应有相关告警）',
+    !warns.some((w) => /未取得配置服务/.test(w)), JSON.stringify(warns));
 }
 
 console.log('\n=== H7: 服务端命名空间契约（dsh-settings）===');
