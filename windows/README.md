@@ -98,7 +98,8 @@ windows/
 - [ ] 托盘菜单（显示/隐藏、退出）
 - [ ] 打包（`electron-builder` → nsis）与 SHA256SUMS
 - [ ] 插件服务端：Windows 上自动装它（现在 `platform !== 'darwin'` 直接跳过）
-- [ ] 插件服务端：`configFilePath()` 按平台选目录（现在硬编码 macOS 路径）
+      —— 注意配置路径那块**已修完**（`appDataDir()` 按平台解析），只剩安装流程
+- [x] ~~插件服务端：`configFilePath()` 按平台选目录~~ ✅ 已做（`appDataDir()`，T6b 14 项断言）
 
 ## ⚠️ 未验证
 
