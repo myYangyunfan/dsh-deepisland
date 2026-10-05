@@ -1,32 +1,97 @@
-# DeepSeek Harness 智能体刘海灵动岛 (DSH VibeIsland)
+# DeepSeek Harness 刘海灵动岛 (VibeIsland)
 
-兼容 **macOS（硬件物理刘海屏）** 与 **Windows（Fluent 亚克力药丸）** 的 DeepSeek Harness 全局智能体工作状态灵动岛插件。
+在 **macOS 屏幕顶端的物理刘海**（或 Windows 顶部）显示 DeepSeek 智能体的实时工作状态：
+思考中 / 执行工具 / 等你审批 / 几个子代理在并行。**点一下就能跳到对应的对话。**
 
-无需任何额外二进制环境，直接以 DSH 官方插件标准导入，即装即用。
+```
+  🧠 思考中 · 正在读 SessionJump.swift            12s
+  ⚡ 执行中 · edit NotchMetrics.swift             8s
+  ❓ 等待你确认 · 工具调用待审批                    3s
+```
 
 ---
 
-## ✨ 核心特性
+## 📦 新用户：三步装好
 
-1. **双平台自适应视觉拟态**
-   - **macOS 刘海模式**：默认吸附于屏幕或窗口正顶端（`top: 0`），双侧微倒角黑晶贴合，完美融入 MacBook 物理刘海。
-   - **Windows Fluent 模式**：采用 Win 11 设计语言，半透明深色亚克力毛玻璃质感（`backdrop-filter: blur(24px)`），全圆角悬浮药丸形态。
-   - **右上角浮标模式**：针对宽屏或分屏场景，微缩于窗口右上角，不遮挡任何正文。
+> 详细说明在 [`swift/INSTALL.md`](./swift/INSTALL.md)（含不装插件的纯手动路线）。
 
-2. **毫秒级内核状态感知（会话游标增量事件流）**
-   - **💭 思考中 (Thinking)**：DeepSeek 标志性幻彩蓝紫流光（Aura Pulse），实时显示当前分析要点。
-   - **⚡ 工具执行中 (Tool Execution)**：青绿色光晕，实时提取当前调用的工具名（`bash`、`read`、`edit`、`write`、`glob`、`grep` 等）以及正在执行的命令或操作的文件名。
-   - **❓ 待审批/提问 (Action Required)**：琥珀金跳动脉冲，提示等待人工确认。
-   - **👥 子代理并行 (Subagents Active)**：从会话谱系目录（`subagentsByParent`）读取运行中的子代理，在胶囊右侧显示 `👥 N` 徽章，展开 HUD 显示并行数量。
-   - **⏱️ 实时计时与指标**：动态秒级耗时计数器、本回合工具调用次数统计。
+### 1. 在 DSH 插件页输入地址安装
 
-3. **双态平滑交互（Pill ↔ HUD）**
-   - **折叠态 (Compact Pill)**：宽度仅 200px ~ 250px，极简呈现核心状态指示灯、状态名、耗时与工具 Badge。
-   - **展开态 (Expanded HUD)**：鼠标悬停或点击立即以 Apple 弹性阻尼动画向下展开为 440px 宽的极客控制台，显示完整命令代码块、耗时和工具流水。
+打开 DSH Desktop → 插件管理 → 输入：
 
-4. **无缝集成 DSH 设置与操作栏**
-   - 自动在 DSH 设置页（`settings.section`）注册「🏝️ 灵动岛」卡片，支持图形化切换形态、光晕动效与位置。
-   - 自动在会话顶部栏（`header.utilities`）注册一键快捷开关按钮。
+```text
+git+https://github.com/myYangyunfan/dsh-deepisland.git
+```
+
+### 2. 双击 `scripts/setup.command`（**这步不能省**）
+
+从仓库下载 zip 解压出来，双击其中的 `scripts/setup.command`。
+
+macOS 会用终端打开它并自动完成登记，跑完按任意键关窗即可。
+它会自己认出 DSH 在跑哪个 profile，不用你填任何东西。
+
+<details>
+<summary><b>为什么不能省这一步？</b>（可以展开看）</summary>
+
+插件管理器的「安装」只做了一半 —— 它跑 `pnpm add`，只写 `dependencies`，
+**不碰 `dsh.profile.bundles`**。而宿主的加载顺序是「按 `dsh.profile.bundles` 顺序叠」，
+所以装完插件它压根不会被加载。
+
+更麻烦的是宿主**一点提示都没有**：插件管理器里照样显示「已安装」，功能毫无反应。
+追到源码，这是宿主 UI 路径的实现缺口 —— 唯一会写 bundles 的
+`reconcileProfilePlugins` 在整个 asar 里只出现 2 次（定义 + export 列表），
+插件管理器压根没调它。而官方 CLI 走另一条代码路径，**会**写。
+
+`setup.command` 调的就是官方 CLI 的完整 cycle（`remove` → `add`），
+跑完自己核对结果，失败才回退到手改 manifest。
+</details>
+
+### 3. 重启 DeepSeek Harness
+
+退出应用再打开（不是关窗口）。
+
+重启后插件会**自动把 macOS app 装好**（下载 → 校验 SHA256 → 解压 → 安装 → 启动），
+几秒后屏幕顶端的刘海就出现了。
+
+### 确认装好了
+
+```bash
+curl -s http://127.0.0.1:47311/health
+```
+
+看到 `"ok":true` 和 `"keys"` 里有 `notchEnabled` 就对了。详细排查见
+[`swift/INSTALL.md`](./swift/INSTALL.md)。
+
+---
+
+## 🖥️ 怎么用
+
+| 操作 | 效果 |
+| :--- | :--- |
+| 鼠标移到刘海 | 面板展开，显示各对话的实时状态 |
+| **点某一行对话** | **直接切到 DSH 里的那个会话**（DSH 在后台也会被拉到前台） |
+| 点面板其余区域 | 钉住 / 取消钉住 |
+| DSH 设置 → 🏝️ 灵动岛 | 开关刘海、开关一步跳转、开关空闲收起 |
+| app 菜单栏图标 | 同样能开关刘海 |
+
+设置改动**下一拍就生效**（app 每 250ms 查一次配置），不用重启任何东西。
+
+> ⚠️ 一键直达依赖上面那个插件。不装插件 app 也能用（手动装一次即可），
+> 但点对话会退回「置前 + 复制标题 + `⌘K` 粘贴」。
+
+---
+
+## ✨ 它能看到什么
+
+- **💭 思考中** —— 正在分析什么（取最近的分析要点）
+- **⚡ 执行中** —— 正在跑哪个工具、动哪个文件
+- **❓ 等待你确认** —— 工具调用待审批，会脉冲提示
+- **👥 子代理并行** —— 同时几个子代理在跑（子代理实现为独立会话，从会话谱系读）
+- **多会话同时跟随** —— DSH 能并行开好几个会话，折叠态显示最该关注的那个 + 徽标，
+  展开态每个对话各占一行，按「谁最需要你介入」排序（最多 6 个）
+
+判定逻辑全部在 `swift/Sources/DSHNotch/Core/` 里，事件流增量扫描、
+有游标缓存，64000 条事件时每轮开销 0.0004ms。
 
 ---
 
@@ -49,6 +114,44 @@
 > 曾经的窗口内 DOM 岛已删除，理由见下一节。
 
 ## 🗑️ 为什么删掉窗口内那个岛
+
+### 设置面板控制的就是物理刘海
+
+```
+DSH 设置面板 ──POST /config──▶ 插件服务端（Node）──▶ client-config.json
+                                                              │
+                            DSHNotch.app（Swift）◀── 读同一份 ◀┘
+```
+
+| 面板开关 | 键 | 效果 |
+| :--- | :--- | :--- |
+| 启用刘海灵动岛 | `notchEnabled` | 物理刘海显示 / 隐藏 |
+| 点对话直接跳转到该会话 | `jumpEnabled` | 关掉则退回「置前 + `⌘K` 粘贴」 |
+| 空闲时自动收起 | `hideWhenIdle` | 同步到 app |
+
+**两个方向都能改** —— app 的菜单栏也有「显示/隐藏刘海灵动岛」，写同一份文件，
+不会出现「面板说开着、菜单说关着」。
+
+app 每 250ms 检查一次配置（靠**文件 mtime + 大小**判变化，没变就返回缓存值），
+所以设置点完**下一拍就生效**，不用重启任何东西。
+
+<details>
+<summary><b>不打开 DSH 也能开关（手动 / 排查用）</b></summary>
+
+```bash
+# 显示 / 隐藏物理刘海
+curl -s -X POST -H 'content-type: application/json' \
+  -d '{"notchEnabled":false}' http://127.0.0.1:47311/config
+
+# 查当前配置
+curl -s http://127.0.0.1:47311/config
+```
+
+配置落在 `~/Library/Application Support/DSHNotch/client-config.json`，
+可以直接看。写接口有**白名单**（只接受已知键与类型）—— 这是本机回环上的
+HTTP 端点，同机任何进程都能调，不校验就等于开了个任意写的口子；
+被拒的键会在响应里如实回报，不会静默丢弃。
+</details>
 
 ### DSH Notch 怎么用（系统级那个）
 
@@ -139,59 +242,6 @@ DSH 在后台时若只投桥，会话确实切了，但窗口还在后台，用�
 
 反过来说，置前放在前面也更自然：窗口先到前台，用户看到的已经是一个切好的会话，
 而不是「切完了再被拉过来」。
-
-## 现在只有一处状态栏：物理刘海
-
-早先有两个：DSH **窗口内**的 DOM 岛（插件渲染）+ macOS **屏幕顶端**的物理刘海岛
-（独立 app）。现已把前者**整个删掉**。
-
-### 为什么删
-
-四条都是它自己的问题，与实现难度无关：
-
-1. **视觉冗余** —— 两个状态栏含义相同、位置不同，用户不知道该看哪个
-2. **出不了 DSH 窗口** —— 渲染进程只能往 `document.body` 塞 fixed 定位的 DOM，
-   所以窗口最小化或被遮挡时它跟着消失；而「随时看到智能体在干什么」正是它的唯一价值
-3. **抢焦点** —— 点它会切走 DSH 窗口焦点，打断正在输入的用户
-4. **点不到** —— 刘海被系统独占，鼠标要移到屏幕顶端才能碰到真岛；
-   窗口里那个反而更显眼，于是用户点了没反应的真岛
-
-### 设置面板现在控制的是物理刘海
-
-面板里的开关直接驱动 `DSHNotch.app`：
-
-```
-DSH 设置面板 ──POST /config──▶ 插件服务端（Node）──▶ client-config.json
-                                                              │
-                                    DSHNotch.app（Swift）◀── 读同一份 ◀┘
-```
-
-| 面板开关 | 键 | 效果 |
-| :--- | :--- | :--- |
-| 启用刘海灵动岛 | `notchEnabled` | 物理刘海显示 / 隐藏 |
-| 点对话直接跳转到该会话 | `jumpEnabled` | 关掉则退回「置前 + ⌘K 粘贴」 |
-| 空闲时自动收起 | `hideWhenIdle` | 同步到 app 的 UserDefaults |
-
-**两个方向都能改**：app 的菜单栏也有「显示/隐藏刘海灵动岛」，
-写的是同一份文件 —— 不会出现「面板说开着、菜单说关着」。
-
-app 每 250ms 检查一次配置，靠 **mtime + 文件大小** 判变化，
-没变就返回缓存值（实际只是一次 `stat`）。所以设置面板点完，刘海上的岛
-**下一拍就消失**，不用重启任何东西。
-
-### 手动开关（不依赖 DSH）
-
-```bash
-# 显示物理刘海
-curl -s -X POST -H 'content-type: application/json' \
-  -d '{"notchEnabled":true}' http://127.0.0.1:47311/config
-
-# 查当前配置
-curl -s http://127.0.0.1:47311/config
-```
-
-也可以直接点 app 的菜单栏图标 → 「隐藏刘海灵动岛」。
-
 
 ### 为什么设置里的开关以前「点不动」
 
@@ -397,18 +447,7 @@ node test/run.mjs cfg        # 配置读写的离线语义（默认值 / 坏文�
 
 本插件遵循 DeepSeek Harness 标准插件规范，可通过以下两种方式直接导入：
 
-### 方式一：复制到 DSH 外部插件目录（推荐）
-
-1. 将当前 `deepisland` 目录复制或重命名为 `dsh-vibe-island`：
-   ```bash
-   cp -r /path/to/deepisland ~/.dsh/profiles/desktop/node_modules/@dsh-external/dsh-vibe-island
-   # 或直接放入 web profile 插件库：
-   cp -r /path/to/deepisland ~/.dsh/profiles/web/node_modules/@dsh-external/dsh-vibe-island
-   ```
-
-2. 刷新 DeepSeek Harness 界面（或访问 `http://127.0.0.1:19387`），模块加载器将自动加载灵动岛。
-
-### 方式二：通过 DSH 插件管理器安装
+### 方式一：通过 DSH 插件管理器安装（推荐）
 
 DSH Desktop 内置插件管理器（`@deepseek-ai/dsh-client-ui-plugin-manager`，随 0.2.0-rc.2 提供），
 安装入口是**输入「包名或地址」**（pnpm 接受的写法都行），不是选择压缩包：
@@ -417,7 +456,7 @@ DSH Desktop 内置插件管理器（`@deepseek-ai/dsh-client-ui-plugin-manager`�
 git+https://github.com/myYangyunfan/dsh-deepisland.git
 ```
 
-装完重启 DSH 生效。实测的三条限制：
+装完还有一步登记（见下面的「还差一步」），然后重启 DSH。实测的三条限制：
 
 - **一次只能装一个** —— 对话框一次跑一条 pnpm 命令，第二个 spec 要等前一个完成
 - **没有版本选择器** —— 不列注册表版本、不提供升级；profile 装的插件**升级＝卸载后重装**
@@ -570,13 +609,15 @@ cat ~/Library/Application\ Support/DSHNotch/bridge.json   # 桥起来了会出�
 
 | 配置项 | 键名 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| **主开关** | `enabled` | `true` | 是否启用屏幕顶部灵动岛状态栏 |
+| **刘海开关** | `notchEnabled` | `true` | **物理刘海是否显示**（设置面板的主开关，也是这里的主角） |
+| **一步跳转** | `jumpEnabled` | `true` | 点岛上的对话直接切到该会话。关掉则退回「置前 + 复制标题 + ⌘K 粘贴」 |
+| **空闲收起** | `hideWhenIdle` | `false` | 空闲一段时间后自动收起刘海 |
 | **显示位置** | `placement` | `notch` | `notch`（顶端吸附） / `floating`（居中悬浮） / `top-right`（右上角） |
 | **平台风格** | `platformMode` | `auto` | `auto`（系统自适应） / `macos`（黑晶刘海） / `windows`（亚克力毛玻璃） |
 | **呼吸光晕** | `glowEffect` | `true` | 是否在 Agent 思考与执行时开启流光光晕动效 |
 | **悬停展开** | `expandOnHover` | `true` | 鼠标悬停在胶囊上时自动展开 HUD 控制台 |
 | **缩放比例** | `scale` | `1.0` | 灵动岛尺寸缩放（范围 0.8 ~ 1.3） |
-| **跳转桥** | `bridgeEnabled` | `true` | 点岛上的对话直接切到该会话。关掉则退回「置前 + 复制标题 + ⌘K 粘贴」 |
+| **跳转桥** | `bridgeEnabled` | `true` | 是否起本机回环桥（一步跳转的通道）。桥挂了只影响跳转，刘海照常显示 |
 | **桥端口** | `bridgePort` | `47311` | 本机回环端口。被占用时自动向后顺延，实际端口写进 `bridge.json` |
 | **自动装 app** | `autoInstallApp` | `true` | macOS 上缺 `DSHNotch.app` 时自动下载校验并安装。**只装缺失的，不做升级** |
 | **安装目录** | `appInstallDir` | `/Applications` | 不可写时自动退到 `~/Applications` |

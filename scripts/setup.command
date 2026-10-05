@@ -89,7 +89,8 @@ if [ -x "$APP" ]; then
     say "✅ 登记完成（dependencies 与 bundles 都已写好）。"
     say ""
     say "👉 请**重启 DeepSeek Harness**（退出应用再打开，不是关窗口）。"
-    say "   重启后：DSH 窗口内会出现灵动岛；macOS 上还会自动装好刘海 app。"
+    say "   重启后：macOS 上会自动装好刘海 app，屏幕顶端出现灵动岛；"
+    say "   DSH 设置 → 🏝️ 灵动岛 里可以开关它。"
     say ""
     say "按任意键关闭这个窗口…"; read -r _
     exit 0
