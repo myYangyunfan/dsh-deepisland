@@ -95,8 +95,11 @@ function installedCopies() {
 
 /** 别的 profile 也装了同一插件时一并提示（多 profile 场景容易漏）。 */
 function otherProfilesWithPlugin() {
+  // 注意：要排除**当前正在操作的这个** profile。
+  // 之前用 explicit 判断，而它只在用户显式传了 profile 时有值 ——
+  // 结果自动探测的情况下会把当前 profile 自己报成「另一个也要登记」。
   return allProfiles().filter((p) => {
-    if (p === explicit) return false;
+    if (p === profile) return false;
     try {
       const m = JSON.parse(fs.readFileSync(path.join(PROFILES, p, 'package.json'), 'utf8'));
       return !!(m.dependencies || {})[BUNDLE];
