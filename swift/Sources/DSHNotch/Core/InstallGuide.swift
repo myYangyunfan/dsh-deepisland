@@ -22,6 +22,21 @@ import Foundation
 /// 3. 客户端文档：把 `dsh.client` 声明变成 `/plugins` 下的 bundle
 ///    的是 "**the host half**"（服务端插件先执行）。
 ///
+/// 更强的一次：隔离 profile 里**真起 web 服务**看日志 —— 同一份package.json、
+/// 只改 bundles：
+///
+/// | bundles | 服务日志 |
+/// | :--- | :--- |
+/// | 无插件 | **完全静默，一个字都不提这个插件** |
+/// | 有插件 | `[dsh-vibe-island] install: present` / `bridge: 已就绪` |
+///
+/// 这比 `--dump-config` 强：前者是「配置文件里有没有」，
+/// 后者是「插件真的跑了没有」。
+///
+/// 而 `ClientModuleRegistry` 注释里那个 `scan` 不是独立扫盘——
+/// 同文件另一处写明 `Checked on every scan trigger (cordis 'internal/plugin')`，
+/// 即 Loader 挂载事件。
+///
 /// 隔离实测（`DSH_HOME` 指到临时目录 + `dsh --dump-config`，
 /// 同一份 package.json、同一个 node_modules 软链，只改 bundles）：
 ///
