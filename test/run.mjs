@@ -7,6 +7,14 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const which = process.argv[2] || 'all';
 
+// 用宿主自带的 Node（runtime/bin/node，Electron 二进制 ELECTRON_RUN_AS_NODE）跑本套件时，
+// Electron 的 asar fs 包装器会把 `readFileSync(app.asar)` 当成读目录，报
+// "ENOENT, not found in app.asar"，test-contract 的 H2 节会整轮红掉。
+// ELECTRON_NO_ASAR=1 是 Electron 官方开关，关掉这层包装。
+if (process.env.ELECTRON_NO_ASAR === undefined) {
+  process.env.ELECTRON_NO_ASAR = '1';
+}
+
 const SUITES = {
   contract: 'test-contract.mjs',
   parse: 'test-parse.mjs',

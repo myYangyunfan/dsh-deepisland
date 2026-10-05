@@ -47,6 +47,24 @@ const check = (name, cond, extra = '') => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 等条件成立，而不是死等固定毫秒数。
+ *
+ * 客户端轮询有 100~500ms 周期，固定 sleep 在机器繁忙时会偶发不够
+ * （全套件连跑时尤其明显），那种 flaky 会把真回归也淹掉。
+ * 凡是「投一条 → 断言它被处理」都用这个。
+ */
+async function waitFor(predicate, { timeoutMs = 3000, stepMs = 40, what = '' } = {}) {
+  const t0 = Date.now();
+  for (;;) {
+    let ok = false;
+    try { ok = predicate(); } catch { ok = false; }
+    if (ok) return true;
+    if (Date.now() - t0 > timeoutMs) return false;
+    await sleep(stepMs);
+  }
+}
+
 function req(port, pathname, { method = 'GET', body = null } = {}) {
   return new Promise((resolve, reject) => {
     const payload = body === null ? null : JSON.stringify(body);
@@ -103,32 +121,37 @@ console.log('\n=== T2: 端到端 —— POST /jump → 客户端 openSession ===
   const fakeCtx = { get: (n) => (n === 'uiWorkspace' ? { openSession: (t) => opened.push(t) } : undefined) };
 
   const client = mod.startJumpBridge(fakeCtx, { pollMs: 120 });
-  // 等它探到端口并完成至少一轮轮询
-  await sleep(600);
+  // 等它探到端口（别死等，第一个 tick 是异步的）
+  await waitFor(() => client.state().base !== null, { what: '探到桥' });
   check('客户端已探到桥', !!client.state().base, JSON.stringify(client.state()));
   check('探到的是本插件的桥（核对插件名）', String(client.state().version || '').length > 0);
+  // 客户端是从 BRIDGE_PORT_BASE 顺延探测的。若 47311 上恰好有**别的**桥
+  // （比如真实 DSH 正开着），它会连过去而不是连本测试这座 —— 那时下面
+  // 对 bridge.port 队列的断言会莫名其妙地失败。显式断言连的是哪一座。
+  check('客户端连的就是本测试这座桥', client.state().base === 'http://127.0.0.1:' + bridge.port,
+    client.state().base + ' vs 127.0.0.1:' + bridge.port);
 
   // 模拟 app 投递
   const SID = 'session-6778327d-5342-4e47-9efa-d21d0db954a6';
   const post = await req(bridge.port, '/jump', { method: 'POST', body: { sessionId: SID, title: '端到端' } });
   check('app 侧 POST /jump 成功', post.status === 200 && post.body.ok === true, JSON.stringify(post.body));
 
-  await sleep(500);
+  await waitFor(() => opened.length >= 1, { what: '首次 openSession' });
   check('客户端已调用 openSession', opened.length === 1, 'opened=' + JSON.stringify(opened));
   check('openSession 收到的是真实 sessionId', opened[0] === SID, String(opened[0]));
 
   // 再投一条，确认是逐条处理而不是只取第一条
   await req(bridge.port, '/jump', { method: 'POST', body: { sessionId: 'session-second' } });
-  await sleep(400);
+  await waitFor(() => opened.length >= 2, { what: '第二条' });
   check('连续两条都被处理', opened.length === 2, 'opened=' + JSON.stringify(opened.length));
 
   // 空队列不该调 openSession
-  await sleep(300);
+  await sleep(400);
   check('空队列时不调 openSession', opened.length === 2, 'opened=' + opened.length);
 
   // 无 sessionId 的请求要被服务端拒，客户端也就不会收到
   const bad = await req(bridge.port, '/jump', { method: 'POST', body: { title: '没有 id' } });
-  await sleep(300);
+  await sleep(400);
   check('非法请求既被拒也不触发跳转', bad.status === 400 && opened.length === 2, bad.status + '/' + opened.length);
 
   const st = client.state();
@@ -177,15 +200,15 @@ console.log('\n=== T4: openSession 抛错不能带崩轮询 ===');
     } : undefined),
   };
   const client = mod.startJumpBridge(flaky, { pollMs: 100 });
-  await sleep(500);
+  await waitFor(() => client.state().base !== null, { what: '客户端探到桥' });
   await req(bridge.port, '/jump', { method: 'POST', body: { sessionId: 'session-boom' } });
-  await sleep(300);
-  check('抛错的那次仍被记录（说明处理了）', opened.includes('session-boom'), JSON.stringify(opened));
+  const gotBoom = await waitFor(() => opened.includes('session-boom'), { what: '第一条' });
+  check('抛错的那次仍被记录（说明处理了）', gotBoom, JSON.stringify(opened));
 
   // 关键：抛错后轮询必须还活着
   await req(bridge.port, '/jump', { method: 'POST', body: { sessionId: 'session-after-boom' } });
-  await sleep(300);
-  check('抛错后轮询仍继续处理后续请求', opened.includes('session-after-boom'), JSON.stringify(opened));
+  const gotAfter = await waitFor(() => opened.includes('session-after-boom'), { what: '第二条' });
+  check('抛错后轮询仍继续处理后续请求', gotAfter, JSON.stringify(opened));
   client.stop();
   await bridge.close();
 }

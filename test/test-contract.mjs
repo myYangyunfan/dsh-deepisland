@@ -52,7 +52,19 @@ if (fs.existsSync(PATCH_FILE)) {
 console.log('\n=== H2: 宿主 bundle 中是否存在这些服务 ===');
 let asar = '';
 if (fs.existsSync(ASAR)) {
-  asar = fs.readFileSync(ASAR).toString('latin1');
+  // ⚠️ 用宿主自带的 Node（runtime/bin/node）跑本套件时，Electron 的 asar fs
+  // 包装器会拦截 `readFileSync(app.asar)` 并报
+  // "ENOENT, not found in app.asar" —— 它把 asar **当成目录**处理。
+  // 解法是 ELECTRON_NO_ASAR=1（Electron 官方开关），在 run.mjs 里设。
+  // 这里再兜一层：真读不出来就跳过这一节，别让整轮回归红掉。
+  try {
+    asar = fs.readFileSync(ASAR).toString('latin1');
+  } catch (e) {
+    console.log('  ⚠️  读不到宿主 asar（' + ((e && e.code) || e) + '）—— 跳过本节。');
+    console.log('     若在 Electron Node 下跑，请设 ELECTRON_NO_ASAR=1');
+  }
+}
+if (asar) {
   console.log('  已读取宿主 asar (' + (asar.length / 1048576).toFixed(0) + ' MB)');
   // 宿主里真实出现过的客户端服务名（从 inject 组合里提取）
   const known = new Set();
