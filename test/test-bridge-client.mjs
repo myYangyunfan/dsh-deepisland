@@ -110,24 +110,40 @@ console.log('\n=== T1: resolveWorkspace 的三条取法 ===');
 // ===========================================================================
 console.log('\n=== T2: 端到端 —— POST /jump → 客户端 openSession ===');
 // ===========================================================================
+// ⚠️ 端口必须是**动态**的，不能用 BRIDGE_PORT_BASE。
+// 真实 DSH 开着时它自己就在 47311 上起桥（正常现象，不是故障），
+// 测试若也往 47311 塞就会：
+//   1) 测试的桥顺延到 47313，而客户端从 47311 顺延探测 → 连到了**真 DSH 的桥**
+//   2) 于是请求投到了真桥上，测试自己的桥队列永远是空的 → 满屏失败，
+//      还可能干扰你正在用的 DSH（把会话切到一个不存在的 id）。
+// 所以这里用 probeBridge 探一个**当前没被占用**的端口。
 {
-  // 桥必须占用客户端认得的那个端口区间内的第一个可用端口。
-  // 客户端从 BRIDGE_PORT_BASE(47311) 起顺延探测，所以让桥从 47311 起。
-  // 若本机 47311 已被占（比如 DSH 正在跑），桥会自己顺延，客户端也能跟上。
-  const bridge = await server.startBridge({ port: mod.BRIDGE_PORT_BASE, log: () => {} });
+  // 找一个空闲端口：从 47311 起顺延，取第一个「探不到任何桥」的位置
+  let port = null;
+  for (let p = 47311; p < 47311 + 12 && port === null; p++) {
+    try {
+      const r = await req(p, '/health', { timeoutMs: 700 });
+      if (r.status === 0) port = p;          // 连不上 → 空闲
+    } catch { port = p; }
+  }
+  check('找到一个没被占用的桥端口', port !== null, '47311..47322 都被占了');
+
+  const bridge = port === null ? null : await server.startBridge({ port, log: () => {} });
   check('服务端桥已起', !!bridge);
+  if (!bridge) { console.log('  ⚠️  无可用端口，后续用例跳过'); }
 
   const opened = [];
   const fakeCtx = { get: (n) => (n === 'uiWorkspace' ? { openSession: (t) => opened.push(t) } : undefined) };
 
-  const client = mod.startJumpBridge(fakeCtx, { pollMs: 120 });
+  // basePort 指到本测试这座桥。必须显式给：否则客户端从 47311 顺延探测，
+  // 真 DSH 开着时会连到**真桥**上去，测试桥的队列永远是空的。
+  const client = mod.startJumpBridge(fakeCtx, { pollMs: 120, basePort: bridge.port });
   // 等它探到端口（别死等，第一个 tick 是异步的）
   await waitFor(() => client.state().base !== null, { what: '探到桥' });
   check('客户端已探到桥', !!client.state().base, JSON.stringify(client.state()));
   check('探到的是本插件的桥（核对插件名）', String(client.state().version || '').length > 0);
-  // 客户端是从 BRIDGE_PORT_BASE 顺延探测的。若 47311 上恰好有**别的**桥
-  // （比如真实 DSH 正开着），它会连过去而不是连本测试这座 —— 那时下面
-  // 对 bridge.port 队列的断言会莫名其妙地失败。显式断言连的是哪一座。
+  // 客户端连的必须就是本测试这座桥。它是从 47311 顺延探测的，若真 DSH 开着
+  // 就可能连到真桥去 —— 那样下面所有队列断言都会莫名其妙地失败。
   check('客户端连的就是本测试这座桥', client.state().base === 'http://127.0.0.1:' + bridge.port,
     client.state().base + ' vs 127.0.0.1:' + bridge.port);
 
@@ -174,22 +190,42 @@ console.log('\n=== T2: 端到端 —— POST /jump → 客户端 openSession ===
 console.log('\n=== T3: 桥不在时客户端必须安静退化 ===');
 // ===========================================================================
 {
-  // 指向一个肯定没人监听的端口区间：探测全失败
+  // ⚠️ 不能靠「当前恰好没有桥」来测 —— 真 DSH 开着时 47311 上就有桥（那是正确行为）。
+  // startJumpBridge 支持注入 basePort，指向一段空端口即可稳定复现「探不到」。
+  const DEAD = 47900;   // 远离真实桥区间 47311..47322
   const fakeCtx = { get: (n) => (n === 'uiWorkspace' ? { openSession: () => { throw new Error('不该被调用'); } } : undefined) };
-  const client = mod.startJumpBridge(fakeCtx, { pollMs: 100 });
-  await sleep(400);
+  const client = mod.startJumpBridge(fakeCtx, { pollMs: 100, basePort: DEAD });
+  await sleep(600);
   const st = client.state();
   check('探不到桥时 base 仍为 null', st.base === null, String(st.base));
   check('记录了 lastError 便于排查', !!st.lastError, String(st.lastError));
-  check('没抛异常、没进入死循环', client.state().stopped === false);
+  check('没抛异常、没进入死循环', st.stopped === false);
   client.stop();
+}
+
+// ===========================================================================
+console.log('\n=== T3b: probeBridge 语义 ===');
+// ===========================================================================
+{
+  const none = await mod.probeBridge(47900);
+  check('空端口段返回 null', none === null, JSON.stringify(none));
+  // 真 DSH 的桥若在running，这里应探到它 —— 两种结果都对，不作强断言
+  const maybe = await mod.probeBridge();
+  if (maybe) {
+    check('探到的桥带端口与版本', !!maybe.port && !!maybe.base, JSON.stringify(maybe));
+  } else {
+    console.log('     ℹ️  当前没有桥在运行（真 DSH 未开），跳过「探到」分支');
+    check('probeBridge 从不抛错', true);
+  }
 }
 
 // ===========================================================================
 console.log('\n=== T4: openSession 抛错不能带崩轮询 ===');
 // ===========================================================================
 {
-  const bridge = await server.startBridge({ port: mod.BRIDGE_PORT_BASE, log: () => {} });
+  // 同样用动态端口：真 DSH 的桥在 47311 时，固定端口会让本测试连到真桥上去
+  const bridge = await server.startBridge({ port: 47950, log: () => {} });
+  check('T4 的桥起在独立端口', !!bridge && bridge.port === 47950, bridge && String(bridge.port));
   const opened = [];
   const flaky = {
     get: (n) => (n === 'uiWorkspace' ? {
@@ -199,7 +235,8 @@ console.log('\n=== T4: openSession 抛错不能带崩轮询 ===');
       },
     } : undefined),
   };
-  const client = mod.startJumpBridge(flaky, { pollMs: 100 });
+  // basePort 直接指到本测试的桥，跳过顺延探测的歧义
+  const client = mod.startJumpBridge(flaky, { pollMs: 100, basePort: 47950 });
   await waitFor(() => client.state().base !== null, { what: '客户端探到桥' });
   await req(bridge.port, '/jump', { method: 'POST', body: { sessionId: 'session-boom' } });
   const gotBoom = await waitFor(() => opened.includes('session-boom'), { what: '第一条' });

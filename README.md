@@ -145,11 +145,17 @@ app.on("open-url", (event, url) => {
 
 ---
 
-## 📥 只装插件就够了
+## 📥 只装插件就够了（但要登记一次）
 
-装了插件，**macOS 上的 DSHNotch.app 会自己装好**：
+装了插件，**macOS 上的 DSHNotch.app 会自己装好**。前提是插件**已被加载**，
+而这一步不是装完就自动的 —— 见下面的
+「[🔴 还差一步：把插件登记进 dsh.profile.bundles](#-还差一步把插件登记进-dshprofilebundles)」。
 
-1. 插件服务端在 `apply()` 时检查 `/Applications/DSHNotch.app`
+插件加载后，`apply()` 会做两件事：
+
+### 一、自动把 macOS app 装好
+
+1. 插件服务端检查 `/Applications/DSHNotch.app`
    （判据是主程序**和**自带的 zstdlite 都在——只看 `.app` 目录是不够的，
    早期就出过「包在但读不到任何会话」的事故）
 2. 缺了就从本仓库 Release 下载 `DSHNotch-<版本>-<架构>.zip`
@@ -158,7 +164,7 @@ app.on("open-url", (event, url) => {
 4. `ditto` 解压（保可执行位与代码签名，`unzip` 会丢）、清 quarantine
 5. 装进 `/Applications`（不可写则退 `~/Applications`）并启动
 
-### 请知情：它会下载并运行一个外部程序
+#### 请知情：它会下载并运行一个外部程序
 
 这是自动安装做不到完全无感的地方，明说在这：
 
@@ -169,6 +175,11 @@ app.on("open-url", (event, url) => {
 - 每一步都打到 DSH 日志（搜 `[dsh-vibe-island]`）
 
 关掉：设置里 `autoInstallApp: false`，然后按 `swift/INSTALL.md` 手动装。
+
+### 二、起本机跳转桥
+
+点岛上的对话直接切到该会话，见上面的
+「[🔗 点一下对话就跳过去：插件桥](#-点一下对话就跳过去插件桥)」。
 
 ---
 
@@ -281,6 +292,64 @@ git+https://github.com/myYangyunfan/dsh-deepisland.git
 
 > 装到哪个 profile 要看 DSH 实际在跑哪个：插件宿主进程的启动参数里第 4 段就是
 > profile 路径（`ps -ax | grep dsh-desktop-host`）。本机是 `desktop`。
+
+### 🔴 还差一步：把插件登记进 `dsh.profile.bundles`
+
+**插件管理器的「安装」只做了一半。** 光装完不生效 —— 这是个真坑，
+而且宿主**一行提示都不打**，用户只会觉得「装了没反应」。
+
+宿主内置文档原文：
+
+> Bundles are npm packages whose manifest declares `"dsh": { "bundle": { "patch":
+> "./cordis.patch.yml" } }`; the tree is composed by applying each bundle's patch
+> lists in **`dsh.profile.bundles` order** over an empty entry list, then the
+> profile's own patches.
+
+而插件管理器的实现（asar 内置文档）是：
+
+> 插件管理器跑 **`pnpm add`**
+
+`pnpm add` 只写 `dependencies`，**不碰 `dsh.profile.bundles`**。这俩是独立字段
+（`initProfile` 里 `dependencies: {}` 和 `bundles: [...bundles]` 各自初始化，
+无任何自动合并）。所以装完插件，它在 `dependencies` 里躺着，却不在 `bundles` 里 ——
+**树按 `bundles` 顺序叠，它压根不会被加载。**
+
+跑这个脚本补上（幂等、改前自动备份）：
+
+```bash
+node scripts/register-bundle.mjs            # 自动探测 DSH 在跑哪个 profile
+node scripts/register-bundle.mjs --check    # 只看状态，不改
+node scripts/register-bundle.mjs --remove   # 摘掉（依赖保留）
+```
+
+或者手改 `~/.dsh/profiles/<profile>/package.json`：
+
+```jsonc
+"dsh": {
+  "profile": {
+    "bundles": [
+      "@deepseek-ai/dsh-base",
+      "@deepseek-ai/dsh-web-app",
+      "@dsh-external/dsh-vibe-island"   // ← 加上这一行
+    ]
+  }
+}
+```
+
+**改完必须重启 DSH Desktop 才生效。** 之后确认：
+
+```bash
+node scripts/register-bundle.mjs --check   # 三项应全绿
+cat ~/Library/Application\ Support/DSHNotch/bridge.json   # 桥起来了会出现
+```
+
+> 为什么这一步不能省，也不能靠插件自己解决：挂载发生在**读 manifest 之前**，
+> bundle 没进列表 → 它的 `apply()` 根本不会被调用 → 也就没有机会去注册桥、
+> 去装 app。这是鸡生蛋，只能由 profile 配置解开。
+>
+> 另外宿主的 bundle 兼容性检查只管 `peerDependencies` 里名字以
+> `@deepseek-ai/dsh-` 开头的包（要求满足 semver）。本插件这些依赖都写 `*`，
+> 任意宿主版本都通过 —— 不会成为跳过原因。
 
 ### 装完就有的东西
 

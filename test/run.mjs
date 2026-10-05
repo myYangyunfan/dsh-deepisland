@@ -20,6 +20,7 @@ const SUITES = {
   parse: 'test-parse.mjs',
   apply: 'test-apply.mjs',
   subagent: 'test-subagent.mjs',
+  mount: 'test-mount.mjs',
   bridge: 'test-bridge.mjs',
   bridgeclient: 'test-bridge-client.mjs',
   installdl: 'test-install-dl.mjs',
