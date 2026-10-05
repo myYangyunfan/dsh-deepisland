@@ -9,22 +9,27 @@
 它已被加载**之后，插件服务端会自己检查 `/Applications/DSHNotch.app`，
 缺就从本仓库 Release 下载、**校验 SHA256**、解压、装好并启动。
 
-⚠️ **但「装上插件」不等于「插件已加载」**，中间还差一步 —— 插件必须先登记进
-profile 的 `dsh.profile.bundles`，否则根本不会被加载，而且宿主**不报任何错**：
+### 但「装上插件」不等于「插件已加载」
+
+插件必须先登记进 profile 的 `dsh.profile.bundles` 才会被加载，
+而**插件管理器的安装只跑 `pnpm add`、只写 `dependencies`，不会写这个列表**。
+不登记的后果是**毫无提示**：插件管理器里照样显示「已安装」，但功能一点反应都没有。
+
+**补这一步：双击仓库里的 `scripts/setup.command`**（自己会找 profile、自己备份、
+出错会解释），或者在终端里跑：
 
 ```bash
-cd <仓库目录>
-node scripts/register-bundle.mjs --check    # 三项全绿才算就绪
-node scripts/register-bundle.mjs            # 补登记（幂等，改前自动备份）
+node "$HOME/.dsh/profiles/desktop/node_modules/@dsh-external/dsh-vibe-island/scripts/register-bundle.mjs"
 ```
 
-详见 [`../README.md`](../README.md) 的
+**然后重启 DSH Desktop。** 详见
+[`../README.md`](../README.md) 的
 「[还差一步：把插件登记进 dsh.profile.bundles](../README.md#-还差一步把插件登记进-dshprofilebundles)」
 —— 那里有宿主为什么这么设计的原文依据。
 
-所以下面的手动步骤在这两种情况下仍然需要：
+### 什么时候还是得手动装 app
 
-- 插件**没装**、或装了**没登记**（即 `register-bundle.mjs --check` 不全绿）
+- 插件**没装**、或装了**没登记**（跑上面那条命令若报「已在 bundles ✅」才算就绪）
 - 你想自己控制安装过程（或把 `autoInstallApp` 关了）
 
 插件自动安装的边界（只装缺失的、绝不覆盖已装的、只从本仓库 Release 下载并校验）见

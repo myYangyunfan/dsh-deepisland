@@ -296,7 +296,7 @@ git+https://github.com/myYangyunfan/dsh-deepisland.git
 ### 🔴 还差一步：把插件登记进 `dsh.profile.bundles`
 
 **插件管理器的「安装」只做了一半。** 光装完不生效 —— 这是个真坑，
-而且宿主**一行提示都不打**，用户只会觉得「装了没反应」。
+而且宿主**一点提示都没有**：插件管理器里照样显示「已安装」，功能毫无反应。
 
 宿主内置文档原文：
 
@@ -314,42 +314,56 @@ git+https://github.com/myYangyunfan/dsh-deepisland.git
 无任何自动合并）。所以装完插件，它在 `dependencies` 里躺着，却不在 `bundles` 里 ——
 **树按 `bundles` 顺序叠，它压根不会被加载。**
 
-跑这个脚本补上（幂等、改前自动备份）：
+> 注意区分：宿主确实有个 `reportSkippedBundles` 会往 stderr 打印跳过原因，
+> 但它只列**「在 bundles 里、却加载失败」**的条目。本插件是**压根不在 bundles 里**，
+> 连「被跳过」都算不上 —— 所以既不在跳过列表里，也不影响别的 bundle，
+> **一点提示都没有**。
+
+#### 怎么补这一步
+
+**双击一个文件就行**（脚本会自己找 profile、自己备份、出错会解释）：
+
+```text
+scripts/setup.command
+```
+
+从 GitHub 下载 zip 解压后双击它，或从仓库里双击。跑完**重启 DSH Desktop** 即可。
+
+<details>
+<summary>或者在终端里跑（等价，二选一）</summary>
 
 ```bash
-node scripts/register-bundle.mjs            # 自动探测 DSH 在跑哪个 profile
-node scripts/register-bundle.mjs --check    # 只看状态，不改
-node scripts/register-bundle.mjs --remove   # 摘掉（依赖保留）
+# 你手上没有仓库也行 —— 脚本随插件装好了，路径是现成的：
+node "$HOME/.dsh/profiles/desktop/node_modules/@dsh-external/dsh-vibe-island/scripts/register-bundle.mjs"
+
+# 只想看状态不改：
+node "$HOME/.dsh/profiles/desktop/node_modules/@dsh-external/dsh-vibe-island/scripts/register-bundle.mjs" --check
+
+# 摘掉（依赖保留）
+node "$HOME/.dsh/profiles/desktop/node_modules/@dsh-external/dsh-vibe-island/scripts/register-bundle.mjs" --remove
 ```
 
-或者手改 `~/.dsh/profiles/<profile>/package.json`：
+已有仓库的话也可以 `node scripts/register-bundle.mjs`。
+profile 名会从 DSH 宿主进程的命令行里自动读出来，不用手填。
+</details>
 
-```jsonc
-"dsh": {
-  "profile": {
-    "bundles": [
-      "@deepseek-ai/dsh-base",
-      "@deepseek-ai/dsh-web-app",
-      "@dsh-external/dsh-vibe-island"   // ← 加上这一行
-    ]
-  }
-}
-```
+**为什么不能省、也不能由插件自己搞定**：挂载发生在**读 manifest 之前**，
+bundle 没进列表 → 它的 `apply()` 根本不会被调用 → 也就没有机会去注册桥、
+去装 app。这是鸡生蛋，只能由 profile 配置解开。
+
+> 顺带说明：宿主里 `dsh.plugin.json` **根本不被读**（asar 里出现 0 次），
+> 那是给人看的说明文件；`engines` 也不参与跳过判断。
+> bundle 唯一会被跳过的原因是 `peerDependencies` 里名字以
+> `@deepseek-ai/dsh-` 开头的包不满足 semver —— 本插件这些都写 `*`，
+> 任意宿主版本都通过，不会成为跳过原因。
 
 **改完必须重启 DSH Desktop 才生效。** 之后确认：
 
 ```bash
-node scripts/register-bundle.mjs --check   # 三项应全绿
+node "$HOME/.dsh/profiles/desktop/node_modules/@dsh-external/dsh-vibe-island/scripts/register-bundle.mjs" --check
+#   三项应全绿
 cat ~/Library/Application\ Support/DSHNotch/bridge.json   # 桥起来了会出现
 ```
-
-> 为什么这一步不能省，也不能靠插件自己解决：挂载发生在**读 manifest 之前**，
-> bundle 没进列表 → 它的 `apply()` 根本不会被调用 → 也就没有机会去注册桥、
-> 去装 app。这是鸡生蛋，只能由 profile 配置解开。
->
-> 另外宿主的 bundle 兼容性检查只管 `peerDependencies` 里名字以
-> `@deepseek-ai/dsh-` 开头的包（要求满足 semver）。本插件这些依赖都写 `*`，
-> 任意宿主版本都通过 —— 不会成为跳过原因。
 
 ### 装完就有的东西
 

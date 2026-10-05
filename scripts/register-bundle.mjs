@@ -1,36 +1,35 @@
 #!/usr/bin/env node
 /**
- * 把本插件注册进 DSH profile 的 `dsh.profile.bundles`。
+ * 一步注册：把本插件加进 DSH profile 的 `dsh.profile.bundles`。
  *
- * ## 为什么需要这个脚本
+ * ## 为什么要这一步
  *
- * **插件管理器的「安装」只做了一半。** 宿主内置文档原文：
+ * 插件管理器的「安装」只跑 `pnpm add`，只写 `dependencies`；
+ * 而宿主按 `dsh.profile.bundles` 顺序叠 patch 树（asar 内置文档原文：
+ * *"the tree is composed by applying each bundle's patch lists in
+ * `dsh.profile.bundles` order over an empty entry list, then the profile's own
+ * patches"*）。两者在 `initProfile` 里各自初始化，**无任何自动合并**
+ * → **不登记就不会被加载**。
  *
- * > Bundles are npm packages whose manifest declares `"dsh": { "bundle": { "patch":
- * > "./cordis.patch.yml" } }`; the tree is composed by applying each bundle's patch
- * > lists in **`dsh.profile.bundles` order** over an empty entry list, then the
- * > profile's own patches.
+ * 为什么用户在界面上看不出异常：宿主确实有个 `reportSkippedBundles` 会往 stderr
+ * 打印跳过原因，但它只列**「在 bundles 里、却加载失败」**的条目。
+ * 本插件的情况是**压根不在 bundles 里** —— 连「被跳过」都算不上，
+ * 所以既不在跳过列表里，也不影响其他 bundle，**一点提示都没有**。
+ * 表现就是：插件管理器里显示「已安装」，但功能毫无反应。
  *
- * 而插件管理器实现（asar 内置文档）：
+ * 鸡生蛋：插件没法自己登记（不在 bundles 里 → `apply()` 不被调用）。
  *
- * > 插件管理器跑 **`pnpm add`**
+ * ## 为什么用这个脚本，而不是让用户手改 JSON
  *
- * `pnpm add` 只写 `dependencies`，**不会碰 `dsh.profile.bundles`**。
- * 两者是独立字段（`initProfile` 里 `dependencies: {}` 与 `bundles: [...bundles]`
- * 各自初始化，无任何自动合并）。
- *
- * 后果：装完插件后它**不会被加载**，而且宿主对跳过的 bundle
- * **一行提示都不打**（`skippedBundles` 走的是 "nothing is printed"），
- * 所以用户看不到任何报错，只会觉得「装了没反应」。
+ * 装插件的人**手上没有仓库**，只有 profile 里的插件目录。
+ * 所以本文件在需要时会把「你实际该跑的那一行」直接打出来（用插件目录的真实路径）。
  *
  * ## 用法
  *
- *   node scripts/register-bundle.mjs              # 自动探测 DSH 在跑哪个 profile
- *   node scripts/register-bundle.mjs desktop      # 指定 profile
- *   node scripts/register-bundle.mjs --check      # 只看状态，不改
- *   node scripts/register-bundle.mjs --remove     # 从 bundles 摘掉（依赖保留）
- *
- * 幂等：已注册就是 no-op。改前自动备份 `package.json`。
+ *   node scripts/register-bundle.mjs           # 登记
+ *   node scripts/register-bundle.mjs --check   # 只看状态，不改
+ *   node scripts/register-bundle.mjs --remove  # 摘掉（依赖保留）
+ *   node scripts/register-bundle.mjs desktop   # 指定 profile
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -48,32 +47,32 @@ const explicit = args.find((a) => !a.startsWith('-'));
 
 const HOME = os.homedir();
 const PROFILES = path.join(HOME, '.dsh', 'profiles');
+const SELF = 'scripts/register-bundle.mjs';
 
-function say(s) { console.log(s); }
+function allProfiles() {
+  try {
+    return fs.readdirSync(PROFILES, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+  } catch { return []; }
+}
 
-/** 找出 DSH 真正在用的 profile：优先 ps 里的宿主命令行，退回 desktop。 */
+/** 猜 DSH 在跑哪个 profile：宿主进程命令行第 4 段是 profile 路径。 */
 function detectProfile() {
   if (explicit) return explicit;
   try {
     const out = execFileSync('/bin/ps', ['-ax', '-o', 'command'], { encoding: 'utf8' });
+    const esc = path.join(PROFILES).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     for (const line of out.split('\n')) {
       if (!line.includes('dsh-desktop-host')) continue;
-      const m = line.match(new RegExp(path.join(PROFILES) + '[\\/]([^\\/\\s]+)'));
+      const m = line.match(new RegExp(esc + '[\\/]([^\\/\\s]+)'));
       if (m) return m[1];
     }
-  } catch { /* ps 受限时走默认 */ }
+  } catch { /* ps 受限 */ }
   return 'desktop';
 }
 
-/** profile 是否装了本插件（dependencies 里有）。 */
-function hasDependency(dir) {
-  try {
-    const m = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
-    return !!(m.dependencies && m.dependencies[BUNDLE]);
-  } catch { return false; }
-}
-
-/** 目录能否被宿主的 packageDirFromAnchor 解析到（复刻其逻辑）。 */
+/** 复刻宿主 packageDirFromAnchor：按包名在 profile 的 node_modules 下找。 */
 function resolves(dir) {
   try {
     const anchor = path.join(dir, 'package.json');
@@ -84,11 +83,33 @@ function resolves(dir) {
   return false;
 }
 
+/** 随包安装后脚本自己在哪 —— 用户手上没有仓库，得指给他实际路径。 */
+function installedCopies() {
+  const out = [];
+  for (const prof of allProfiles()) {
+    const p = path.join(PROFILES, prof, 'node_modules', ...BUNDLE.split('/'), SELF);
+    if (fs.existsSync(p)) out.push(p);
+  }
+  return out;
+}
+
+/** 别的 profile 也装了同一插件时一并提示（多 profile 场景容易漏）。 */
+function otherProfilesWithPlugin() {
+  return allProfiles().filter((p) => {
+    if (p === explicit) return false;
+    try {
+      const m = JSON.parse(fs.readFileSync(path.join(PROFILES, p, 'package.json'), 'utf8'));
+      return !!(m.dependencies || {})[BUNDLE];
+    } catch { return false; }
+  });
+}
+
 const profile = detectProfile();
 const dir = path.join(PROFILES, profile);
 
 if (!fs.existsSync(dir)) {
-  console.error(`❌ profile 不存在：${dir}`);
+  console.error(`❌ 找不到 profile 目录：${dir}`);
+  console.error(`   本机现有 profile：${allProfiles().join(', ') || '(无)'}`);
   process.exit(1);
 }
 
@@ -96,42 +117,60 @@ const manifestPath = path.join(dir, 'package.json');
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const bundles = manifest.dsh?.profile?.bundles || [];
 const inBundles = bundles.includes(BUNDLE);
-const inDeps = hasDependency(dir);
+const inDeps = !!(manifest.dependencies || {})[BUNDLE];
 
-say(`DSH profile      ${profile}`);
-say(`插件在 dependencies ${inDeps ? '✅' : '❌（先用插件管理器装上）'}`);
-say(`目录可被解析       ${resolves(dir) ? '✅' : '❌ 装依赖缺失或路径不对'}`);
-say(`已在 bundles     ${inBundles ? '✅' : '❌  ← 这就是它不生效的原因'}`);
+console.log(`DSH profile        ${profile}`);
+console.log(`插件在 dependencies ${inDeps ? '✅' : '❌'}`);
+console.log(`目录可被解析        ${resolves(dir) ? '✅' : '❌'}`);
+console.log(`已在 bundles      ${inBundles ? '✅' : '❌  ← 不登记就不会被加载'}`);
 
 if (CHECK) {
-  say('');
-  say(inBundles
-    ? '✅ 已注册。重启 DSH Desktop 生效。'
-    : `❌ 未注册。执行：node scripts/register-bundle.mjs ${profile}`);
+  if (inBundles) {
+    console.log('\n✅ 已登记。重启 DSH Desktop 即生效。');
+    const others = otherProfilesWithPlugin();
+    if (others.length) {
+      console.log(`   ℹ️  另有 profile 也装了本插件但未检查：${others.join(', ')}`);
+      console.log('      每个 profile 的 bundles 是独立的，需要各自登记。');
+    }
+  } else {
+    console.log('\n❌ 未登记。跑这一行（脚本已随插件装好，路径是现成的）：');
+    const copies = installedCopies();
+    const target = copies[0]
+      || path.join(dir, 'node_modules', ...BUNDLE.split('/'), SELF);
+    console.log(`   node ${JSON.stringify(target)}`);
+    if (copies.length > 1) {
+      console.log('\n   其它 profile 里也有一份，按需跑：');
+      for (const c of copies.slice(1)) console.log(`   node ${JSON.stringify(c)}`);
+    }
+    console.log('\n   然后重启 DSH Desktop。');
+  }
   process.exit(inBundles ? 0 : 1);
 }
 
 if (REMOVE) {
-  if (!inBundles) { say('\n本来就不在 bundles 里，无需改动。'); process.exit(0); }
+  if (!inBundles) { console.log('\n本来就不在 bundles 里，无需改动。'); process.exit(0); }
   manifest.dsh.profile.bundles = bundles.filter((b) => b !== BUNDLE);
   const backup = manifestPath + '.bak-register';
   fs.copyFileSync(manifestPath, backup);
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
-  say(`\n✅ 已从 bundles 摘除（依赖仍保留）。备份：${backup}`);
-  say('   重启 DSH 生效。');
+  console.log(`\n✅ 已从 bundles 摘除（依赖仍保留）。备份：${backup}`);
+  console.log('   重启 DSH 生效。');
   process.exit(0);
 }
 
-if (inBundles) { say('\n✅ 已在 bundles 里，无需改动。重启 DSH 生效。'); process.exit(0); }
+if (inBundles) {
+  console.log('\n✅ 已在 bundles 里，无需改动。重启 DSH 即生效。');
+  process.exit(0);
+}
 
 if (!inDeps) {
-  console.error('\n❌ profile 的 dependencies 里没有本插件。先在 DSH 插件管理器里安装：');
+  console.error('\n❌ 这个 profile 的 dependencies 里没有本插件。');
+  console.error('   先在 DSH 的插件页安装：');
   console.error('   git+https://github.com/myYangyunfan/dsh-deepisland.git');
   process.exit(1);
 }
 if (!resolves(dir)) {
-  console.error('\n❌ 目录解析不到（依赖没装好）。试：');
-  console.error(`   cd ${dir} && pnpm install`);
+  console.error(`\n❌ 目录解析不到（依赖没装好）。试：cd ${dir} && pnpm install`);
   process.exit(1);
 }
 
@@ -143,11 +182,9 @@ const backup = manifestPath + '.bak-register';
 fs.copyFileSync(manifestPath, backup);
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
 
-say('');
-say('✅ 已加入 dsh.profile.bundles：');
-for (const b of manifest.dsh.profile.bundles) say('     · ' + b);
-say(`   备份：${backup}`);
-say('');
-say('👉 重启 DSH Desktop 后生效。然后：');
-say('   cat ~/Library/Application\\ Support/DSHNotch/bridge.json   # 应出现');
-say('   插件在 macOS 上还会自动把 DSHNotch.app 装好。');
+console.log('\n✅ 已加入 dsh.profile.bundles：');
+for (const b of manifest.dsh.profile.bundles) console.log('     · ' + b);
+console.log(`   备份：${backup}`);
+console.log('\n👉 重启 DSH Desktop 后生效。然后确认：');
+console.log(`   cat ${JSON.stringify(path.join(HOME, 'Library/Application Support/DSHNotch/bridge.json'))}`);
+console.log('   桥起来了会出现这个文件；macOS 上还会自动把 DSHNotch.app 装好。');

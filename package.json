@@ -16,10 +16,15 @@
   },
   "files": [
     "lib",
+    "scripts",
     "cordis.patch.yml",
     "dsh.plugin.json",
     "README.md"
   ],
+  "scripts": {
+    "register-bundle": "node scripts/register-bundle.mjs",
+    "check-bundle": "node scripts/register-bundle.mjs --check"
+  },
   "license": "MIT",
   "engines": {
     "dsh": ">=0.0.1"

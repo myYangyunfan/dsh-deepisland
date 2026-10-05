@@ -145,6 +145,46 @@ console.log('\n=== T4: 本机 profile 注册状态（回答「装完能不能直
   }
 }
 
+// ---- T5: 登记脚本必须随包发布，且双击路径可用 --------------------------
+console.log('\n=== T5: 登记脚本（用户唯一要做的动作）===');
+{
+  // 装插件的人手上**没有仓库**，只有 profile 里的插件目录。
+  // 脚本不在 files 里 = 用户根本跑不到它，这一步就等于不存在。
+  check('package.json 的 files 含 scripts（脚本要随包装走）',
+    Array.isArray(pkg.files) && pkg.files.includes('scripts'), JSON.stringify(pkg.files));
+
+  const s1 = path.join(ROOT, 'scripts', 'register-bundle.mjs');
+  const s2 = path.join(ROOT, 'scripts', 'setup.command');
+  check('scripts/register-bundle.mjs 存在', fs.existsSync(s1));
+  check('scripts/setup.command 存在（双击即可，不必开终端）', fs.existsSync(s2));
+
+  if (fs.existsSync(s1)) {
+    const src = fs.readFileSync(s1, 'utf8');
+    check('登记脚本认得插件包名', src.includes(BUNDLE));
+    // 用户只有插件目录，脚本必须能自己算出「你该跑哪一行」
+    check('脚本会打印可直接复制的插件目录路径（用户没有仓库）',
+      /installedCopies|node_modules/.test(src) && src.includes('node '),
+      '缺少「告诉我跑哪条」的输出');
+    check('脚本支持 --check（只查不改）', src.includes('--check'));
+    check('脚本支持 --remove（可撤销）', src.includes('--remove'));
+    check('改前会备份 package.json', /bak-register/.test(src));
+    check('幂等（已在 bundles 里就不重复添加）', /已在 bundles 里，无需改动/.test(src));
+  }
+
+  if (fs.existsSync(s2)) {
+    const sh = fs.readFileSync(s2, 'utf8');
+    check('setup.command 是可执行的（双击才会跑）',
+      (fs.statSync(s2).mode & 0o111) !== 0,
+      'mode=' + (fs.statSync(s2).mode & 0o777).toString(8));
+    check('setup.command 自己找 profile（不要求用户填）',
+      /dsh-desktop-host/.test(sh) && /PROFILES/.test(sh));
+    check('setup.command 提示要重启 DSH', /重启/.test(sh));
+    // 中文文件名在部分工具链下会显示成问号，这里守 ASCII 文件名
+    check('文件名是纯 ASCII（避免编码环境下的显示问题）', /^[\x20-\x7e]+$/.test(path.basename(s2)),
+      path.basename(s2));
+  }
+}
+
 console.log('\n' + '='.repeat(44));
 console.log('通过 ' + pass + ' / 失败 ' + fail);
 console.log('='.repeat(44));
