@@ -195,9 +195,18 @@ function parse(text) {
     p.steps = toInt(ss.steps ?? ss.step);
     p.llmMs = toFloat(ss.llmMs);
     p.toolMs = toFloat(ss.toolMs);
-    p.hasOpenStep = !!ss.openStep;
-    if (Array.isArray(ss.pendingCalls)) {
-      p.pendingCallIds = ss.pendingCalls.map((c) => (typeof c === 'string' ? c : c && c.callId)).filter(Boolean);
+    // ⚠️ openStep 真实形态是 `null`（不是 false/缺省）。
+    // 「非 null 即为真」—— 这是 Swift 版 `!(v is NSNull) && v != nil` 的直译。
+    p.hasOpenStep = ss.openStep !== null && ss.openStep !== undefined;
+    // ⚠️ pendingCalls 真实形态是**对象** `{ callId: {…} }`，不是数组。
+    // （Swift 版读 `pending.keys.sorted()` —— 我第一版照抄成数组，
+    //   结果真实文件上永远拿到 0 条，状态判定不出「正在执行」。）
+    const pc = ss.pendingCalls;
+    if (pc && typeof pc === 'object' && !Array.isArray(pc)) {
+      p.pendingCallIds = Object.keys(pc).sort();
+    } else if (Array.isArray(pc)) {
+      // 兜住另一种可能的形态（数组 of string / of {callId}）
+      p.pendingCallIds = pc.map((c) => (typeof c === 'string' ? c : c && c.callId)).filter(Boolean);
     }
   }
 

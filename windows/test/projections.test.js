@@ -89,6 +89,34 @@ console.log('\n=== P3: 宽松解析（自造边界输入）===');
       q && q.todoTotal === 0 && q.todoCurrent === null, q && String(q.todoTotal));
   }
 
+  // 🔴 pendingCalls 真实形态是**对象** {callId: {…}}，不是数组。
+  // 第一版照抄成 `Array.isArray()` → 真实文件上永远 0 条，
+  // 状态判定不出「正在执行工具」。Swift 版读的是 `pending.keys.sorted()`。
+  {
+    const q = P.parse(JSON.stringify({ record: { rows: { sessionStats: {
+      seq: 9, val: { turns: 1, openStep: null, pendingCalls: {} } } } } }));
+    check('pendingCalls 是空对象时长度为 0（不是崩）',
+      q && Array.isArray(q.pendingCallIds) && q.pendingCallIds.length === 0, JSON.stringify(q && q.pendingCallIds));
+    check('openStep 为 null → hasOpenStep=false', q && q.hasOpenStep === false);
+  }
+  {
+    const q = P.parse(JSON.stringify({ record: { rows: { sessionStats: {
+      seq: 9, val: { turns: 2, openStep: { step: 3 }, pendingCalls: { call_b: {}, call_a: { name: 'bash' } } } } } } }));
+    check('pendingCalls 是对象时取它的键（排序后）',
+      q && q.pendingCallIds.length === 2 && q.pendingCallIds[0] === 'call_a' && q.pendingCallIds[1] === 'call_b',
+      JSON.stringify(q && q.pendingCallIds));
+    check('openStep 非 null → hasOpenStep=true', q && q.hasOpenStep === true);
+    check('有在飞调用时状态判定得出「正在执行」',
+      q && (q.hasOpenStep || q.pendingCallIds.length > 0), JSON.stringify(q && { o: q.hasOpenStep, p: q.pendingCallIds.length }));
+  }
+  {
+    // 兜住另一种可能形态：数组
+    const q = P.parse(JSON.stringify({ record: { rows: { sessionStats: {
+      seq: 9, val: { pendingCalls: ['c1', { callId: 'c2' }] } } } } }));
+    check('pendingCalls 若是数组也能吃（兜底）',
+      q && q.pendingCallIds.length === 2, JSON.stringify(q && q.pendingCallIds));
+  }
+
   check('缺 record 返回 null', P.parse('{"version":1}') === null);
   check('缺 rows 返回 null', P.parse('{"record":{}}') === null);
   check('坏 JSON 返回 null（不抛错）', P.parse('{not json') === null);
