@@ -346,6 +346,26 @@ console.log('\n=== T6: 设置持久化 —— 复现并锁死「开关点不动�
     typeof afterEvil.body.config.enabled === 'boolean', JSON.stringify(afterEvil.body.config));
   check('原型没被污染', {}.polluted === undefined, String({}.polluted));
 
+  // 白名单拒绝必须**回报**，不能静默丢弃。
+  // 真的踩过：老版本白名单里没有 notchEnabled，面板显示「已保存」，
+  // 而刘海一直不动 —— 响应 ok:true 与实际结果不符，排查方向全被带偏。
+  const mixed = await req(bridge.port, '/config', {
+    method: 'POST', body: { notchEnabled: true, bogusKey: 1 },
+  });
+  check('部分键被拒时仍 ok:true（合法的那部分要生效）',
+    mixed.body.ok === true && mixed.body.config.notchEnabled === true, JSON.stringify(mixed.body));
+  check('被拒的键会回报（不是静默丢弃）',
+    Array.isArray(mixed.body.rejected) && mixed.body.rejected.some((r) => r.key === 'bogusKey'),
+    JSON.stringify(mixed.body.rejected));
+
+  const allBad = await req(bridge.port, '/config', {
+    method: 'POST', body: { x1: 1, x2: 2 },
+  });
+  check('全部键被拒时必须 ok:false（不能报成功）',
+    allBad.body.ok === false, 'ok=' + allBad.body.ok);
+  check('给出可读的原因',
+    /没有可接受的键/.test(allBad.body.error || ''), JSON.stringify(allBad.body.error));
+
   const broken = await req(bridge.port, '/config', { method: 'POST', body: '{not json' });
   check('坏 JSON 返回 400 而不是抛错', broken.status === 400, String(broken.status));
   const notObj = await req(bridge.port, '/config', { method: 'POST', body: [1, 2] });
