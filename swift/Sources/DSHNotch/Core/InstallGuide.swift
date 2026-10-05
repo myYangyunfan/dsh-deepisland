@@ -4,6 +4,21 @@ import Foundation
 ///
 /// ## 为什么需要它（这不是"多做一个功能"）
 ///
+/// /// 更正一个说法：`reconcileProfilePlugins` 确实是死函数，但**它不是关键**。
+/// 真正写 bundles 的是 `selectBundle(name, true)`：
+///
+/// ```swift
+/// // 插件管理器服务端
+/// if (options?.enabled !== false) await this.selectBundle(name, true)
+/// ```
+///
+/// 界面调用时传 `enabled: false`（`installBundle(spec, { enabled: false })`），
+/// 于是这一步被跳过；官方 CLI 不传该参数，所以 `dsh plugin add` **会自动登记**。
+///
+/// 而界面上本来有个**「立即启用」按钮**（装完对话框里，t("installEnableNow")），
+/// 点它就等于补登记 —— 大多数人装完直接关了对话框，所以没点上。
+/// 本app 是给「没看见那个按钮」的人准备的等价替代。
+///
 /// 插件管理器的「安装」只做了一半 —— 它跑 `pnpm add`，只写 `dependencies`，
 /// **不碰 `dsh.profile.bundles`**。而宿主按 `bundles` 顺序叠加载树，
 /// 所以装完插件**压根不会被加载**，而且宿主**一点提示都没有**。
@@ -38,7 +53,7 @@ import Foundation
 /// 即 Loader 挂载事件。
 ///
 /// 隔离实测（`DSH_HOME` 指到临时目录 + `dsh --dump-config`，
-/// 同一份 package.json、同一个 node_modules 软链，只改 bundles）：
+/// 同一份 package.json、同一个 node_modules，只改 bundles）：
 ///
 /// | dependencies | bundles |插件树里 |
 /// | :--- | :--- | :--- |

@@ -44,12 +44,18 @@ macOS 会用终端打开它并自动完成登记，跑完按任意键关窗即�
 所以装完插件它压根不会被加载。
 
 更麻烦的是宿主**一点提示都没有**：插件管理器里照样显示「已安装」，功能毫无反应。
-追到源码，这是宿主 UI 路径的实现缺口 —— 唯一会写 bundles 的
-`reconcileProfilePlugins` 在整个 asar 里**只出现 1 次（就是它自己的定义）**，
-零调用点 —— 它是个死函数。插件管理器没调它，官方 CLI 走的也是另一条路径。
+追到源码，确切位置找到了：插件管理器的界面调用是
+`installBundle(spec, { enabled: false })`，而这个实现里写着
+`if (options?.enabled !== false) await this.selectBundle(name, true)` ——
+`enabled: false` 让它**跳过了写 bundles 那一步**。官方 CLI 不传这个参数，所以会自动登记。
 
-用 `dsh --profile X --dump-config` 在隔离 `DSH_HOME` 上实测过：
-同一份 `package.json`、同一个 `node_modules` 软链，**只改 `bundles`**：
+界面那边其实有个**「立即启用」按钮**（装完的对话框里，`t("installEnableNow")`），
+点它就等于补登记 —— 大多数人是装完直接关了对话框，所以没点上。
+
+**如果你在插件页装完看到「立即启用」，点它就够了，不用第二步。**
+
+用 `dsh --profile X --dump-config` 对比过两种状态（同一份 `package.json`、
+同一个 `node_modules`，**只改 `bundles`**）：
 
 | `dependencies` | `bundles` | 插件树里 |
 | :--- | :--- | :--- |
@@ -57,9 +63,9 @@ macOS 会用终端打开它并自动完成登记，跑完按任意键关窗即�
 | 有 | 有 | 出现（`# == @dsh-external/dsh-vibe-island`） |
 
 `dependencies` 只负责把文件装到 `node_modules`，**对加载毫无影响**。
-所以这个缺口不是配置问题，是宿主 UI 路径没实现 —— 换任何写法绕不过去。
 
-`setup.command` 调的就是官方 CLI 的完整 cycle（`remove` → `add`），
+`setup.command` 优先调官方 CLI 的完整 cycle（`remove` → `add`，
+因为宿主 CLI 内部的 bundles 同步只处理**本次新增**的依赖），
 跑完自己核对结果，失败才回退到手改 manifest。
 </details>
 
@@ -545,14 +551,31 @@ git+https://github.com/myYangyunfan/dsh-deepisland.git
 无任何自动合并）。所以装完插件，它在 `dependencies` 里躺着，却不在 `bundles` 里 ——
 **树按 `bundles` 顺序叠，它压根不会被加载。**
 
-#### 这是宿主 UI 路径的实现缺口，不是配置问题
+#### 确切原因：界面传了 `enabled: false`
 
-追到源码了。宿主里唯一会写 `bundles` 的函数是 `reconcileProfilePlugins`
-（内部会调 `writeProfileBundles`），而在整个 asar 里它只出现 **2 次**：
-一次定义、一次在 export 列表里 —— **插件管理器的 `installBundle` 路径压根没调用它**。
+真正写 `bundles` 的是 `selectBundle(name, true)`，而插件管理器的服务端实现是：
 
-而官方 CLI 走的是另一条自己实现的代码（`reconcile` + `saveManifest`），**会**写。
-所以同一件事，CLI 能做、插件页做不到 —— 差的是代码路径，不是配置。
+```js
+return this.configure(async () => {
+  if (options?.enabled !== false)
+    await this.selectBundle(name, true);   // ← 这一步被跳过了
+  ...
+});
+```
+
+界面调用时传的是 `installBundle(spec, { enabled: false, ... })`，
+于是**跳过了写 `bundles`**。官方 CLI 不传这个参数（`enabled` 为 `undefined`），
+所以 `dsh plugin add` **会自动登记** —— 同一件事，差别只在代码路径。
+
+实测过：在干净 profile 上跑 `dsh plugin add <git 地址>`，
+装完 `bundles` 变成 `["@deepseek-ai/dsh-base", "@dsh-external/dsh-vibe-island"]` ✅
+
+**而且界面上本来就有「立即启用」按钮**（装完的对话框里）——
+它调的就是 `setBundleEnabled(name, true)`，等于补登记。
+大多数人装完直接关了对话框，所以没点上。
+
+> 如果你装的时候看到了「立即启用」，**点它就够了，第二步不用做**。
+> 第二步是给没看见那个按钮的人准备的等价替代。
 
 还有个细节值得记（它也解释了为什么直接 add 没用）：
 

@@ -6,10 +6,12 @@
 # 而宿主是按 dsh.profile.bundles 顺序叠插件树。不登记 = 不会被加载，
 # 而且界面上**一点提示都没有**（插件管理器里照样显示「已安装」）。
 #
-# 已查证：宿主里唯一会写 bundles 的函数 reconcileProfilePlugins
-# **在插件管理器（installBundle）里没有被调用**（只在 export 列表里出现），
-# 所以这是宿主 UI 路径的实现缺口，不是配置问题。
-# 而官方 CLI（`dsh plugin add <git-url>`）走另一条代码路径，会同时写两处。
+# 已查证：插件管理器的界面调用 installBundle 时传 enabled: false，
+# 而该实现里写着 `if (options?.enabled !== false) await this.selectBundle(name, true)`
+# —— enabled: false 让它跳过了写 bundles 那一步。官方 CLI 不传这个参数，所以会自动登记。
+#
+# 界面其实有个「立即启用」按钮（装完对话框里），点它等于补登记。
+# 本脚本是给「没看见那个按钮」的人准备的等价替代。
 #
 # 本脚本优先用官方 CLI，失败再回退到直接改 profile 的 package.json。
 # 不需要用户知道仓库在哪 —— 它自己找 profile、自己备份。
