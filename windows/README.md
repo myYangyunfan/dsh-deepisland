@@ -1,20 +1,30 @@
 # DSH Notch for Windows
 
-Windows 版的刘海灵动岛。**状态：骨架阶段，未完成。**
+Windows 版的刘海灵动岛。**状态：数据层已完成并验证，UI 层未做。**
 
 ## 现在有什么
 
 ```
 windows/
-├── README.md          ← 你在这里
-├── package.json       Electron 壳（窗口/托盘/生命周期）
+├── README.md              ← 你在这里
+├── package.json           Electron 壳（独立子项目，不受根 package.json 的 type:module 影响）
 ├── src/
-│   ├── main.js        主进程：无边框置顶小窗 + 托盘 + 配置轮询
-│   ├── preload.js     暴露最小能力给渲染进程（不开放 node）
-│   ├── renderer.js    状态条 UI（折叠条 / 展开面板）
-│   └── config.js      读 client-config.json（与 macOS 版同一份协议）
-└── session/           会话数据读取（与 macOS 版同一套逻辑）
+│   ├── session-source.js  ✅ 会话发现 + zstd 解压 + 事件解码（33 项自检）
+│   ├── projections.js     ✅ 读 DSH 的投影快照 + 宽松解析（47 项自检）
+│   ├── config.js          ⬜ 读 client-config.json（与 macOS 版同一份协议）
+│   ├── main.js            ⬜ 主进程：无边框置顶小窗 + 托盘 + 配置轮询
+│   ├── preload.js         ⬜ 暴露最小能力给渲染进程（不开放 node）
+│   └── renderer.js        ⬜ 状态条 UI（折叠条 / 展开面板）
+└── test/
+    ├── run.js                 跑器
+    ├── session-source.test.js
+    └── projections.test.js
 ```
+
+**数据层已完成**：80 项自检，Node 22 与宿主 Electron Node 24.18.1 各跑一遍全过，
+用**真实**会话文件（9 个）与真实投影文件（15 个）验证，不是造假样本。
+
+**UI 层还没动** —— 它需要 Windows 才能验。跑 `node test/run.js` 可复验数据层。
 
 ## 数据现状：能显示什么、不能显示什么（**先读这段**）
 
@@ -81,8 +91,7 @@ windows/
 ## 待办
 
 - [ ] `config.js` —— 读 `%APPDATA%\DSHNotch\client-config.json`，按 mtime 缓存
-- [ ] `session/` —— 移植 `swift/Sources/DSHNotch/Core/SessionSource.swift` 的逻辑
-- [ ] 事件流解析 + 游标缓存（对应 macOS 版的 `ProjectionCache.swift`）
+
 - [ ] 渲染进程 UI（折叠条 / 展开面板 / 多会话行）
 - [ ] 点击某行 → `POST http://127.0.0.1:47311/jump`
 - [ ] 置前 DSH（Windows 上的深链/激活方式**待查证**，macOS 是 `dsh://open`）
