@@ -1,0 +1,30 @@
+{
+  "name": "dsh-notch-windows",
+  "productName": "DSHNotch",
+  "version": "0.1.0",
+  "description": "DSH 智能体刘海灵动岛 · Windows 版",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node test/run.js",
+    "dist": "electron-builder --win --x64"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.dshnotch.windows",
+    "productName": "DSHNotch",
+    "files": ["src/**/*", "package.json"],
+    "win": {
+      "target": ["nsis"],
+      "artifactName": "DSHNotch-${version}-win-${arch}.zip"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
