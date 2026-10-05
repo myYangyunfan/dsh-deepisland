@@ -374,9 +374,35 @@ node "$HOME/.dsh/profiles/desktop/node_modules/@dsh-external/dsh-vibe-island/scr
 profile 名会从 DSH 宿主进程的命令行里自动读出来，不用手填。
 </details>
 
-**为什么不能省、也不能由插件自己搞定**：挂载发生在**读 manifest 之前**，
+#### 试过让 pnpm 自动登记，行不通（实测记录）
+
+免得后人再试一遍。**pnpm 确实会为 git 依赖跑 `prepare` 脚本**（实测会执行），
+看起来像是能自动登记的正路，但有两个各自致命的坑：
+
+1. **默认被供应链安全挡住**。pnpm 11 要求先把它加进 `allowBuilds` 才跑：
+
+   ```text
+   ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED: … is not in the "allowBuilds" allowlist
+   ```
+
+   而白名单要写**精确到 commit hash** 的 spec
+   （`"@作者/包@git+…#<40位hash>": true`）—— 意味着每装一个版本、每升级一次，
+   用户都得手动改一次 `pnpm-workspace.yaml`。比双击一个文件更麻烦。
+
+2. **就算放行了也会被覆盖**。pnpm 的顺序是
+   **先跑 git 依赖的 `prepare` → 然后才写 profile 的 `package.json`**。
+   实测 `prepare` 脚本自报「成功登记」，但它写进 manifest 的那一项
+   被 pnpm 随后的写入盖掉了，bundles 里根本没有。
+
+两条叠起来这条路彻底没戏。宿主侧也没有别的钩子：
+`normalizeShippedProfile` 只在 profile 仍是出厂默认组合时重置 bundles（与装新插件无关）；
+`dsh --profile desktop …` 被 Electron 独占，CLI 进不去这个 profile。
+
+**结论：这一步省不掉，只能给用户一个一键入口。**
+
+它也是**不能由插件自己搞定**的：挂载发生在**读 manifest 之前**，
 bundle 没进列表 → 它的 `apply()` 根本不会被调用 → 也就没有机会去注册桥、
-去装 app。这是鸡生蛋，只能由 profile 配置解开。
+去装 app。鸡生蛋，只能由 profile 配置解开。
 
 > 顺带说明：宿主里 `dsh.plugin.json` **根本不被读**（asar 里出现 0 次），
 > 那是给人看的说明文件；`engines` 也不参与跳过判断。
