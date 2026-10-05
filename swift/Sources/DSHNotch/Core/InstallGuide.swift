@@ -8,6 +8,31 @@ import Foundation
 /// **不碰 `dsh.profile.bundles`**。而宿主按 `bundles` 顺序叠加载树，
 /// 所以装完插件**压根不会被加载**，而且宿主**一点提示都没有**。
 ///
+/// ## 为什么不能在 DSH 的灵动岛设置里做这件事
+///
+/// 常被问：「装了插件不就有设置页了？能在设置页里引导补登记吗？」
+/// 答：**那个状态设置页不存在**。查证链条（全部实测，非推理）：
+///
+/// 1. 宿主文档（`dsh-app-boot` README）明写：插件树 = 从空列表开始，
+///    **按 `dsh.profile.bundles` 顺序**叠各 bundle 的 patch。
+///    `dependencies` 只管把文件装进 `node_modules`。
+/// 2. 客户端清单的唯一入口是 `ClientModuleRegistry` 构造函数里的
+///    `for (const entry of ctx.loader.entries())` 加上
+///    `ctx.on("internal/plugin", ...)` —— 两路都只经过 Loader。
+/// 3. 客户端文档：把 `dsh.client` 声明变成 `/plugins` 下的 bundle
+///    的是 "**the host half**"（服务端插件先执行）。
+///
+/// 隔离实测（`DSH_HOME` 指到临时目录 + `dsh --dump-config`，
+/// 同一份 package.json、同一个 node_modules 软链，只改 bundles）：
+///
+/// | dependencies | bundles |插件树里 |
+/// | :--- | :--- | :--- |
+/// | 有 | 无 | **不出现** |
+/// | 有 | 有 | 出现 |
+///
+/// 所以引导位只能是**不依赖插件已被加载**的地方 —— app 菜单正是那种
+/// （是插件自动装 app，不是 app 依赖插件），方向相反但不矛盾。
+///
 /// 原来的解法是让用户去仓库里双击 `scripts/setup.command`。
 /// 但那是给"手上没有 app 的人"的路；对**已经有 app 的人**（老用户升级、
 /// 手滑删了插件又重装、或者本来就手工装过 app），再让他去下载仓库找文件

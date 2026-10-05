@@ -45,14 +45,25 @@ macOS 会用终端打开它并自动完成登记，跑完按任意键关窗即�
 
 更麻烦的是宿主**一点提示都没有**：插件管理器里照样显示「已安装」，功能毫无反应。
 追到源码，这是宿主 UI 路径的实现缺口 —— 唯一会写 bundles 的
-`reconcileProfilePlugins` 在整个 asar 里只出现 2 次（定义 + export 列表），
-插件管理器压根没调它。而官方 CLI 走另一条代码路径，**会**写。
+`reconcileProfilePlugins` 在整个 asar 里**只出现 1 次（就是它自己的定义）**，
+零调用点 —— 它是个死函数。插件管理器没调它，官方 CLI 走的也是另一条路径。
+
+用 `dsh --profile X --dump-config` 在隔离 `DSH_HOME` 上实测过：
+同一份 `package.json`、同一个 `node_modules` 软链，**只改 `bundles`**：
+
+| `dependencies` | `bundles` | 插件树里 |
+| :--- | :--- | :--- |
+| 有 | 无 | **不出现** |
+| 有 | 有 | 出现（`# == @dsh-external/dsh-vibe-island`） |
+
+`dependencies` 只负责把文件装到 `node_modules`，**对加载毫无影响**。
+所以这个缺口不是配置问题，是宿主 UI 路径没实现 —— 换任何写法绕不过去。
 
 `setup.command` 调的就是官方 CLI 的完整 cycle（`remove` → `add`），
 跑完自己核对结果，失败才回退到手改 manifest。
 </details>
 
-### 3. 重启 DeepSeek Harness### 3. 重启 DeepSeek Harness
+### 3. 重启 DeepSeek Harness
 
 退出应用再打开（不是关窗口）。
 
