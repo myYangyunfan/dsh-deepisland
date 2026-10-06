@@ -225,6 +225,23 @@ check('诊断文件落在应用数据目录', /plugin-diagnose\.log/.test(srv));
 check('ESM 作用域内不得使用 require()',
   !/[^\w.\$]require\(\s*['"]node:/.test(srv.replace(/\/\/[^\n]*/g, '')),
   (srv.match(/[^\w.\$]require\(\s*['"]node:[^\n]*/) || [])[0] || '');
+
+// 🔴 node:https **不读** HTTPS_PROXY（只有 curl / undici 会）。
+// 国内网络与带 MITM 的环境下 github.com 直连不通，插件下载 app 会静默失败。
+// 本项目真踩过：诊断日志里只有一句 unable to verify the first certificate。
+check('resolveProxy 读取代理设置', /export function resolveProxy/.test(srv));
+check('resolveProxy 支持 HTTPS_PROXY/https_proxy/HTTP_PROXY',
+  /HTTPS_PROXY/.test(srv) && /https_proxy/.test(srv)
+  && /HTTP_PROXY/.test(srv) && /http_proxy/.test(srv));
+check('尊重 NO_PROXY（本地 profile 也要能直连）', /NO_PROXY|no_proxy/.test(srv));
+check('用 CONNECT 隧道而不是把代理地址当主机', /method: .CONNECT./.test(srv));
+check('httpsGet 直连失败才回退代理（代理本身可能不可用）',
+  /先直连/.test(srv) && /catch \(directErr\)/.test(srv));
+check('两次失败都带进错误信息（要能区分直连失败 / 代理失败）',
+  /直连失败（/.test(srv) && /也失败（/.test(srv));
+// 🔴 绝不能为了「能下载」去关证书校验 —— 那是把最后一道防线拆掉。
+check('不得为了下载而关闭 TLS 校验',
+  !/rejectUnauthorized:\s*false/.test(srv) && !/NODE_TLS_REJECT_UNAUTHORIZED/.test(srv));
 check('诊断日志用顶层静态 import 的 fs/path',
   /import fsSync from 'node:fs'/.test(srv) && /import pathSync from 'node:path'/.test(srv));
 check('settings 服务缺失时也有告警', /settings 服务不可用/.test(srv));

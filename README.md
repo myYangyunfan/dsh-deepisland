@@ -115,6 +115,28 @@ if (options?.enabled !== false)
 
 </details>
 
+<details>
+<summary><b>网络不通 / 下载失败时怎么办？</b>（可以展开看）</summary>
+
+插件会**自己读 `HTTPS_PROXY` / `HTTP_PROXY`**（Node 的 `node:https` 默认不读，
+只有 curl 会），直连失败时自动改走代理隧道。`NO_PROXY` 会被尊重。
+
+如果还是失败，诊断日志会写清是**直连失败**还是**代理失败**：
+
+```text
+~/Library/Application Support/DSHNotch/plugin-diagnose.log
+```
+
+每次启动 DSH 都会重写这个文件。想让插件直接跳过下载、自己装 app：
+
+```bash
+cd <仓库> && swift/build.sh install
+```
+
+装好后插件检测到 `/Applications/DSHNotch.app` 存在就跳过下载。
+
+</details>
+
 ### 3. 重启 DeepSeek Harness
 
 **退出应用再打开**（不是关窗口 —— 关窗口 DSH 还活着，插件不会重新启动）。
