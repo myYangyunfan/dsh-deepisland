@@ -219,6 +219,14 @@ check('register 失败被 try/catch 捕获', /catch\s*\(error\)[\s\S]{0,200}log\
 check('降级日志走统一 log()（GUI 启动时 console 用户看不到）',
   !/catch\s*\(error\)[\s\S]{0,200}console\.warn/.test(srv));
 check('诊断文件落在应用数据目录', /plugin-diagnose\.log/.test(srv));
+// 🔴 ESM 里没有 require。第一版在 apply() 里写 require('node:fs')造日志，
+// 抛的 ReferenceError 被外层 catch 吞掉 → logFile 恒为 null →
+// **诊断日志永远不生成，而且看不出任何异常**。真踩过。
+check('ESM 作用域内不得使用 require()',
+  !/[^\w.\$]require\(\s*['"]node:/.test(srv.replace(/\/\/[^\n]*/g, '')),
+  (srv.match(/[^\w.\$]require\(\s*['"]node:[^\n]*/) || [])[0] || '');
+check('诊断日志用顶层静态 import 的 fs/path',
+  /import fsSync from 'node:fs'/.test(srv) && /import pathSync from 'node:path'/.test(srv));
 check('settings 服务缺失时也有告警', /settings 服务不可用/.test(srv));
 // 客户端与服务端 NS 必须一致
 const cliNs = (src.match(/const NS = "([^"]+)"/) || [])[1];
