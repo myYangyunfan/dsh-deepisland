@@ -213,7 +213,12 @@ console.log('  命名空间: ' + NS);
 check('NS 为小写连字符标识符（合法）', /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(NS), NS);
 check('服务端 inject 为 [settings]', /export const inject = \['settings'\]/.test(srv), srv.match(/export const inject = \[[^\]]*\]/) && srv.match(/export const inject = \[[^\]]*\]/)[0]);
 check('register 调用签名正确 (ns, schema, {base})', /ctx\.settings\.register\(\s*NS,\s*Config,\s*\{\s*base:/.test(srv));
-check('register 失败被 try/catch 捕获', /catch\s*\(error\)[\s\S]{0,200}console\.warn/.test(srv));
+// 2026-06:降级路径改走统一 log()（同时写诊断文件），不再用 console.warn。
+// 断言跟着行为走：只要「catch 里有输出」即可，不绑定具体 API。
+check('register 失败被 try/catch 捕获', /catch\s*\(error\)[\s\S]{0,200}log\(/.test(srv));
+check('降级日志走统一 log()（GUI 启动时 console 用户看不到）',
+  !/catch\s*\(error\)[\s\S]{0,200}console\.warn/.test(srv));
+check('诊断文件落在应用数据目录', /plugin-diagnose\.log/.test(srv));
 check('settings 服务缺失时也有告警', /settings 服务不可用/.test(srv));
 // 客户端与服务端 NS 必须一致
 const cliNs = (src.match(/const NS = "([^"]+)"/) || [])[1];
