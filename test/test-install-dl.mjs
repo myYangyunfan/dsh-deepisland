@@ -46,10 +46,39 @@ console.log('\n=== T1: 已安装时必须不动它 ===');
   fs.writeFileSync(path.join(app, 'Resources', 'zstdlite'), 'fake');
   const before = fs.statSync(path.join(app, 'MacOS', 'DSHNotch')).mtimeMs;
 
-  const r = await mod.ensureAppInstalled({ installDir: FAKE_DIR, log: () => {} });
+  const r = await mod.ensureAppInstalled({ installDir: FAKE_DIR, log: () => {}, launch: false });
   check('已装则报 present', r.status === 'present', JSON.stringify(r));
   const after = fs.statSync(path.join(app, 'MacOS', 'DSHNotch')).mtimeMs;
   check('已装则一个字节都不动', before === after, before + ' vs ' + after);
+}
+
+console.log('\n=== T1b: 已装也要「请求启动」（否则重启 DSH 后永远没岛）===');
+{
+  // 曾经的缺陷：present 直接 return，从不启动 app。
+  // DSH 重启后 app 不会自己回来 → 用户眼里就是「插件在、重启了、却没岛」。
+  const calls = [];
+  const fakeSpawn = (cmd, args, opts) => { calls.push({ cmd, args, opts }); return { on() {}, unref() {} }; };
+  const r = await mod.ensureAppInstalled({ installDir: FAKE_DIR, log: () => {}, spawnImpl: fakeSpawn });
+  check('present 时报告已请求启动', r.status === 'present' && r.launched === true, JSON.stringify(r));
+  check('确实调了 open 且指向已装的 app',
+    calls.length === 1 && calls[0].cmd === 'open' && String(calls[0].args[0]).includes('DSHNotch.app'),
+    JSON.stringify(calls));
+
+  // 反向断言：launch:false 必须真的零动作（测试环境不能真去开 app）
+  const calls2 = [];
+  const r2 = await mod.ensureAppInstalled({
+    installDir: FAKE_DIR, log: () => {}, launch: false,
+    spawnImpl: (c) => { calls2.push(c); return { on() {}, unref() {} }; },
+  });
+  check('launch:false 时零动作', calls2.length === 0 && r2.launched === false, JSON.stringify(r2));
+
+  // 启动失败（ENOENT）不能把插件带崩：必须挂 error 监听而不是靠 try/catch
+  let listened = false;
+  const r3 = await mod.ensureAppInstalled({
+    installDir: FAKE_DIR, log: () => {},
+    spawnImpl: () => ({ on(ev) { if (ev === 'error') listened = true; }, unref() {} }),
+  });
+  check('对 open 挂了 error 监听（失败不致命）', listened === true && r3.launched === true, String(listened));
 }
 
 console.log('\n=== T2: 残缺的包不覆盖 ===');
