@@ -242,6 +242,35 @@ check('两次失败都带进错误信息（要能区分直连失败 / 代理失�
 // 🔴 绝不能为了「能下载」去关证书校验 —— 那是把最后一道防线拆掉。
 check('不得为了下载而关闭 TLS 校验',
   !/rejectUnauthorized:\s*false/.test(srv) && !/NODE_TLS_REJECT_UNAUTHORIZED/.test(srv));
+// 与上一条**并存**才完整：既要严禁「关掉校验」，又要真的能过企业 MITM。
+// 做法是把系统钥匙串里被信任的 CA 也纳入信任集合（Node 官方
+// `--use-system-ca` 的等价物）—— 证书链照常严格校验，只是信任源变多。
+check('读系统钥匙串的根证书（企业 MITM / 抓包环境）',
+  /find-certificate/.test(srv) && /SystemRootCertificates\.keychain/.test(srv)
+  && /System\.keychain/.test(srv));
+check('只在 macOS 上读钥匙串（其它平台不执行 security）',
+  /process\.platform === 'darwin'/.test(srv) && /\/usr\/bin\/security/.test(srv));
+check('httpsGet 把系统 CA 交给 TLS（不是只信内置 CA）',
+  /const trustCA = tlsTrustOptions\(\)/.test(srv) && /opts\.ca = trustCA/.test(srv));
+check('系统 CA 有进程内缓存（不每次请求都读钥匙串）',
+  /_systemCACache/.test(srv));
+// 首次安装必须预写一份**明确**的默认配置。
+// 否则文件不存在 → UI 读到空对象 → 那套取反逻辑会写进 notchEnabled:false
+// → 用户明明想开岛，反而把岛关掉（本机实测复现两轮，症状与"没装好"一样）。
+check('首次安装预写默认配置（防 UI 取反把岛写关）',
+  /首次安装：写入默认配置/.test(srv) && /existsSync\(cfgFile\)/.test(srv));
+check('预写默认值只在新装时（已有配置不覆盖用户意愿）',
+  /if \(!nodeFs\.existsSync\(cfgFile\)\)/.test(srv));
+// 这两条都是「证书修好之后才第一次被跑到」的路径 —— 之前 TLS 从没通过，
+// 所以下载安装这条线**整条都没被执行过**，藏了两个 bug。
+// ① 302：`releases/latest` 必须「不跟随」才能读到 Location。
+check('releases/latest 用 followRedirects:false 读 302',
+  /followRedirects = true/.test(srv) && /if \(!followRedirects\)/.test(srv)
+  && /followRedirects: false/.test(srv));
+// ② `fsp` 导的是 node:fs/promises，cp 直接挂模块上；
+//    写成 fsp.promises.cp 会取到 undefined。
+check('解压落位用 fs/promises 的 cp（不是 fsp.promises.cp）',
+  /await fsp\.cp\(/.test(srv) && !/fsp\.promises\.cp\(/.test(srv));
 check('诊断日志用顶层静态 import 的 fs/path',
   /import fsSync from 'node:fs'/.test(srv) && /import pathSync from 'node:path'/.test(srv));
 check('settings 服务缺失时也有告警', /settings 服务不可用/.test(srv));
