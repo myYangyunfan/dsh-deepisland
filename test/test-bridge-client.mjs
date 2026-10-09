@@ -11,6 +11,29 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
+// ⚠️ 本套件的 T6 会 POST /config 落盘、结束时再 unlink 那个文件。
+// 若不改 HOME，写的是、删的是**用户真实**的
+// ~/Library/Application Support/DSHNotch/client-config.json ——
+// 跑一次测试就把用户的灵动岛设置清空了（本轮实测踩到：
+// 配置莫名消失，排查半天才发现是测试自己删的）。
+//
+// os.homedir() 在 POSIX 上读 $HOME（已实测响应），Windows 分支读 USERPROFILE；
+// 两个都指到临时目录，appDataDir() 自然跟着走。
+// **别改成删真实文件后「恢复备份」—— 备份期间进程被杀照样丢。**
+const REAL_HOME = process.env.HOME;
+const REAL_USERPROFILE = process.env.USERPROFILE;
+const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-island-test-home-'));
+process.env.HOME = TEST_HOME;
+process.env.USERPROFILE = TEST_HOME;
+const restoreHome = () => {
+  if (REAL_HOME === undefined) delete process.env.HOME; else process.env.HOME = REAL_HOME;
+  if (REAL_USERPROFILE === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = REAL_USERPROFILE;
+  try { fs.rmSync(TEST_HOME, { recursive: true, force: true }); } catch { /* ignore */ }
+};
+// 用 exit 钩子而不是只在末尾调用：中途断言抛异常也要把 HOME 还回去。
+process.on('exit', restoreHome);
+
 // 复用服务端半边。它静态 import 了宿主提供的 @deepseek-ai/schemastery，
 // 仓库里没装；造一个只够构造 Config 的最小替身，跑完立刻删 ——
 // 绝不能长期留在仓库里遮蔽真依赖。
@@ -331,6 +354,11 @@ console.log('\n=== T6: 设置持久化 —— 复现并锁死「开关点不动�
     JSON.stringify(got.body.config));
 
   const cfgFile = path.join(os.homedir(), 'Library', 'Application Support', 'DSHNotch', 'client-config.json');
+  // 守死「测试不碰用户真实环境」这条线：这个路径必须落在临时 HOME 内。
+  // 它曾经就是用户的真实配置路径 —— 测试写它、跑完还删它，
+  // 用户跑一次测试设置就没了。这条断言红了就别往下跑。
+  check('测试用的配置路径在临时 HOME 内（不碰真实环境）',
+    cfgFile.startsWith(TEST_HOME), cfgFile + ' 不在 ' + TEST_HOME);
   check('配置文件真的落盘了（不是只在内存）', fs.existsSync(cfgFile), cfgFile);
   const onDisk = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
   check('磁盘内容与接口返回一致', onDisk.enabled === false, JSON.stringify(onDisk));
