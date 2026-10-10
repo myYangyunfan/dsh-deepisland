@@ -2,7 +2,7 @@
 // 依赖: 无（纯 Node 内置模块 + 读取 lib/client.js 源码）
 // 退出码: 0 = 全部通过（有断言的套件统计 pass/fail；perf/degradation 为诊断脚本，仅打印数据）
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const which = process.argv[2] || 'all';
@@ -24,6 +24,7 @@ const SUITES = {
   bridge: 'test-bridge.mjs',
   bridgeclient: 'test-bridge-client.mjs',
   installdl: 'test-install-dl.mjs',
+  installwin: 'test-install-win.mjs',
   perf: 'perf.mjs',
   degradation: 'degradation.mjs',
 };
@@ -36,8 +37,13 @@ const list = which === 'all' ? Object.keys(SUITES).filter((k) => !NETWORK_SUITES
 
 // harness 先跑：执行 client.js 并把 factory 产物挂到 globalThis.__mod
 // test-apply 自带独立 harness（不依赖 __mod），其余套件都需要
+// Windows 上绝对路径形如 `D:\...`，直接喂 import() 会被当成 URL 协议（d:），
+// 报 ERR_UNSUPPORTED_ESM_URL_SCHEME —— 必须转成 file:// URL。
+// （macOS 上一直能跑，所以这个坑在接手 Windows 之前没暴露过。）
+const load = (p) => import(pathToFileURL(p).href);
+
 if (list.some(k => !['apply', 'bridge'].includes(k))) {
-  await import(path.join(__dirname, 'harness.mjs'));
+  await load(path.join(__dirname, 'harness.mjs'));
 }
 
 for (const key of list) {
@@ -46,7 +52,7 @@ for (const key of list) {
   console.log('\n' + '#'.repeat(50));
   console.log('# 套件: ' + key + '  (' + file + ')');
   console.log('#'.repeat(50));
-  await import(path.join(__dirname, file));
+  await load(path.join(__dirname, file));
 }
 
 const r = globalThis.__results || {};
