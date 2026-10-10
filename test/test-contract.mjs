@@ -240,8 +240,20 @@ check('httpsGet 直连失败才回退代理（代理本身可能不可用）',
 check('两次失败都带进错误信息（要能区分直连失败 / 代理失败）',
   /直连失败（/.test(srv) && /也失败（/.test(srv));
 // 🔴 绝不能为了「能下载」去关证书校验 —— 那是把最后一道防线拆掉。
-check('不得为了下载而关闭 TLS 校验',
-  !/rejectUnauthorized:\s*false/.test(srv) && !/NODE_TLS_REJECT_UNAUTHORIZED/.test(srv));
+//
+// 2026-10-10 收紧口径：原来这里是「全文件不许出现 rejectUnauthorized:false」。
+// 但后来加了一处**只读探测**（proxyIssuerName：连上去取对端证书名字就断，
+// 不传任何数据），它确实需要临时放宽才能握手成功。于是断言改成表达真正的
+// 纪律 —— **放宽只能存在于那个只读函数里，且全局只能有一处**：
+if (!/NODE_TLS_REJECT_UNAUTHORIZED/.test(srv)) {
+  const codeOnly = srv.split('\n').filter((l) => !/^\s*(\*|\/\/)/.test(l)).join('\n');
+  const relaxed = (codeOnly.match(/rejectUnauthorized\s*:\s*false/g) || []).length;
+  check('不得为了下载而关闭 TLS 校验（放宽至多一处，且只在只读探测里）',
+    relaxed <= 1 && (relaxed === 0 || /proxyIssuerName/.test(srv)),
+    '放宽处数=' + relaxed);
+} else {
+  check('不得为了下载而关闭 TLS 校验（全局开关必须不存在）', false, 'NODE_TLS_REJECT_UNAUTHORIZED 出现了');
+}
 // 与上一条**并存**才完整：既要严禁「关掉校验」，又要真的能过企业 MITM。
 // 做法是把系统钥匙串里被信任的 CA 也纳入信任集合（Node 官方
 // `--use-system-ca` 的等价物）—— 证书链照常严格校验，只是信任源变多。
@@ -279,6 +291,57 @@ const cliNs = (src.match(/const NS = "([^"]+)"/) || [])[1];
 check('客户端 NS 与服务端一致', cliNs === NS, cliNs + ' vs ' + NS);
 // 客户端 configForms.get 也用同一 NS
 check('configForms.get 使用同一 NS', new RegExp('configForms\\.get\\(NS\\)').test(src));
+
+// ── peerDependencies 的写法直接决定「插件管理器里能不能装上」 ──
+//
+// 实测（Windows 11 + DSH 0.2.0-rc.2，2026-10-10）：peerDeps 全写 `*` 时，
+// `pnpm add git+https://.../dsh-deepisland.git` 直接失败：
+//   [ERR_PNPM_FETCH_404] @deepseek-ai/dsh-compact: Not Found
+//
+// 原因：`@deepseek-ai/*` 这些包的 npm `latest` 标签停在远古版本
+// （dsh-settings 的 latest = 0.0.1-rc.1，DSH 实际用的是 0.2.0-rc.2），
+// 而那个远古版本的依赖树里引用了 `dsh-compact` —— 这个包从未发布到公共
+// registry，于是整棵解析树 404。`*` 让 pnpm 跟着 latest 走 → 装到远古版 → 404。
+// 钉死精确版本后 404 消失（已实测）。
+//
+// 之所以要加断言：这个失败**完全不报错在插件这一侧**，只表现为
+// 「插件管理器里报错」，很容易被当成网络/代理问题去查，方向从一开始就错。
+console.log('\n=== peerDependencies 写法（决定能不能被插件管理器装上）===');
+{
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const peers = pkg.peerDependencies || {};
+  const names = Object.keys(peers);
+
+  const wildcards = names.filter((n) => peers[n] === '*' || peers[n] === '' || peers[n] === 'x');
+  check('peerDependencies 里没有裸 *（会让 pnpm 装 latest 远古版 → 404）',
+    wildcards.length === 0,
+    '裸 * 的包：' + wildcards.join(', '));
+
+  // 必须用 workspace:* 而不是精确版本号，这是**两难里的唯一正解**：
+  //
+  //   裸 `*`       → pnpm 跟 latest 走，装到 @deepseek-ai/* 的远古版
+  //                 → 那棵依赖树里有从未发布的 dsh-compact → 404，装不上；
+  //   精确版本号   → 宿主的 evaluatePluginCompatibility 会判不满足
+  //                 → 整个 bundle 被跳过（且无提示），插件装上了也不加载。
+  //
+  // 宿主的 evaluatePluginCompatibility（dsh-app-boot/lib/index.js）把
+  // `workspace:^` / `workspace:~` / `workspace:*` **当作 runtimeVersion 本身**
+  // 来比对，于是恒满足、不触发跳过；而 pnpm 见到 workspace: 协议就知道
+  // 「这是宿主工作区里的包」，不会去 registry 解析。
+  // 两边都不吃亏，所以这是唯一该用的写法。
+  const WORKSPACE_OK = new Set(['workspace:^', 'workspace:~', 'workspace:*']);
+  const deepPeers = names.filter((n) => n.startsWith('@deepseek-ai/'));
+  const badRange = deepPeers.filter((n) => !WORKSPACE_OK.has(peers[n]));
+  check('@deepseek-ai/* 全部用 workspace: 协议（宿主不跳过 + pnpm 不查 registry）',
+    badRange.length === 0,
+    badRange.map((n) => n + '=' + peers[n]).join(', '));
+
+  check('cordis 也是 workspace:（否则同样触发兼容性跳过）',
+    WORKSPACE_OK.has(peers['@deepseek-ai/cordis']), String(peers['@deepseek-ai/cordis']));
+  check('没有把宿主包写成精确版本号（会被兼容性检查拦下，插件静默不加载）',
+    deepPeers.every((n) => !/^\d/.test(peers[n])),
+    deepPeers.filter((n) => /^\d/.test(peers[n])).map((n) => n + '=' + peers[n]).join(', '));
+}
 
 console.log('\n' + '='.repeat(50));
 console.log('宿主契约验证: 通过 ' + pass + ' / 失败 ' + fail);
