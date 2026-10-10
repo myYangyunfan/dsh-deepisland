@@ -93,8 +93,40 @@ if (options?.enabled !== false)
 ```
 
 界面的调用是 `installBundle(spec, { enabled: false, ... })`，
-`enabled: false` 让它**跳过了那一步**。官方 CLI 不传这个参数，所以会自动登记
-（实测 `dsh plugin add` 装完 bundles 就写好了）。
+`enabled: false` 让它**跳过了那一步**。
+
+> ⚠️ 曾在这里写着「官方 CLI 不传这个参数，所以会自动登记（实测装完 bundles 就写好了）」。
+> **该结论已被推翻**（2026-10-10，Windows 11 + DSH 0.2.0-rc.2 实测）：
+> CLI 走同一条 `reconcile()`，而它依赖「目录已落地」——
+> `pnpm add` 没成功时它会抛 `cannot resolve profile bundle` 而不是补登记。
+> 详见下方「确切原因」一节。
+
+### ✅ 但现在（peerDependencies 修好之后）实测通了
+
+2026-10-10 在 Windows 11 + DSH 0.2.0-rc.2 上真跑的结果：
+
+```
+dsh plugin --profile web add https://github.com/myYangyunfan/dsh-deepisland.git
+→ Progress: resolved 4, reused 3, downloaded 1, added 4, done
+
+deps:    {"@dsh-external/dsh-vibe-island":"github:myYangyunfan/dsh-deepisland"}
+bundles: 含 @dsh-external/dsh-vibe-island   ✅ 自动登记了
+import:  成功，35 ms，apply/inject 都在
+```
+
+**即：一行命令装完，bundles 自动登记，插件能被加载。** 不需要手动跑
+`register-bundle.mjs` —— 但它仍在包里，作为 CLI 失败时的兜底。
+
+之所以之前跑不通，是 `peerDependencies` 全写 `*`：pnpm 会跟着 npm 的 `latest`
+标签走，而这些 `@deepseek-ai/*` 包的 `latest` 停在远古版本（`dsh-settings` 的
+latest = `0.0.1-rc.1`，DSH 实际用 `0.2.0-rc.2`），那个远古版的依赖树引用了
+**从未发布到公共 registry 的 `dsh-compact`** → 整棵解析树 404。
+
+⚠️ **写版本号是另一个坑**：宿主 `evaluatePluginCompatibility` 会拿
+`semver.satisfies(runtimeVersion, range)` 判 peer，不满足就**整个 bundle 被跳过
+且无提示**（装上了但插件永不加载，比装不上更难查）。
+正解是 `workspace:^` —— 宿主把它当 runtimeVersion 本身比对（恒满足），
+pnpm 也知道这是工作区内的包而不去 registry 解析。两边都不吃亏。
 
 界面上本来就有「立即启用」按钮，它调的正是 `setBundleEnabled(name, true)` ——
 **所以这不是缺功能，是按钮容易被忽略**。大多数人装完直接关了对话框。
@@ -183,44 +215,54 @@ curl -s http://127.0.0.1:47311/health
 
 ## 🪟 Windows 现状
 
-**状态栏本体目前只有 macOS 版。** 这一点说清楚，免得你按 Windows 版来装结果扑空。
+**Windows 端的状态栏本体已经补齐**（`windows/`，Electron 无边框置顶小窗 + 托盘），
+并在 Windows 11 真机上跑通过。之前的「Windows 没有状态栏」是接手时的状态，现已不成立。
 
 | 能力 | macOS | Windows |
 | :--- | :--- | :--- |
-| **屏幕顶端的状态栏本体** | ✅ `DSHNotch.app`（NSPanel，物理刘海） | ❌ **没有** |
+| **屏幕顶端的状态栏本体** | ✅ `DSHNotch.app`（NSPanel，物理刘海） | ✅ `DSHNotch.exe`（Electron 无边框置顶小窗，屏顶居中） |
+| 托盘入口 | ➖（屏顶常驻，不需要） | ✅ 显示/隐藏、开机自启、桥状态、打开配置目录、退出 |
 | 插件设置面板 | ✅ | ✅（纯 DOM，跨平台） |
-| 点岛跳会话（本机桥） | ✅ | ✅（`node:http` 回环，跨平台） |
-| 缺 app 自动安装 | ✅ | ❌ 跳过（`platform !== 'darwin'` 直接返回） |
+| 点岛跳会话（本机桥） | ✅ | ✅（`node:http` 回环，跨平台；DSH 侧的真实切换待端到端验证） |
+| 缺 app 自动安装 | ✅ | ✅（下载 zip → 校 SHA256 → 装到 `%LOCALAPPDATA%\Programs\DSHNotch`） |
 
-### 为什么 Windows 没有了
+### 为什么是 Electron 而不是原生 Win32
 
-Windows 版的状态栏原本是**窗口内的 DOM 覆盖层**（`.platform-windows` 皮肤 +
-`backdrop-filter` 毛玻璃 + 右上角浮标模式）。2026-10 那次「删掉窗口内岛」
-连它一起删掉了 —— 理由对 macOS 成立（出不了 DSH 窗口、抢焦点、点不到），
-但**对 Windows 不成立**：Windows 上没有 NSPanel 的等价物，
-那个 DOM 覆盖层当时是唯一形态。
+Windows 上没有 NSPanel 的等价物。手写原生要处理 `WS_EX_LAYERED` /
+`WS_EX_TRANSPARENT` / `SetWindowPos(HWND_TOPMOST)` / 点击穿透 / DPI 缩放 /
+托盘图标与右键菜单，每处都有坑。Electron 几十行就能拿到同样的效果，
+而且 **DSH 自己就是 Electron**，不会出现「两个 GUI 框架抢焦点」。
 
-这是一个已知缺口，不是设计选择。
+顺带解决一个硬门槛：会话文件是 **zstd** 压缩的，解码要靠 Node 内置的
+`zlib.zstdDecompressSync` —— Electron 33（Node 20）没有这个函数，
+所以 Windows 端锁 **Electron ≥ 42**（现用 44.7.0 / Node 24.21.0）。
 
-### 想要 Windows 状态栏
+代价是体积：安装包 111 MB、zip 153 MB（macOS 版 1.2 MB）。
 
-需要另写一个 Windows 原生 app（托盘/顶栏小窗），读同一份配置
-`~/AppData/Roaming/DSHNotch/client-config.json`，数据源与 macOS 版相同
-（`~/.dsh/sessions/**/session.v4.jsonl.zstd`，纯文件读取，跨平台可行）。
+### 与 macOS 版共享什么
 
-**它还没做。** 进度与限制会在
-[`windows/README.md`](./windows/README.md) 里持续更新。
+同一份配置协议 `client-config.json`（Windows 在 `%APPDATA%\DSHNotch\`）、
+同一个本机桥 `127.0.0.1:47311`、同一个数据源
+`~/.dsh/sessions/**/session.v4.jsonl.zstd`。
+所以设置面板两边通用，配置跨机器同步也是自然的。
 
-### 现在在 Windows 上能做什么
+### 限制（都在 `windows/README.md` 里写全了）
 
-装插件 + 走完登记之后：
+- **置前 DSH** 降级为「复制标题 + 提示 Ctrl+K」：`dsh://open` 在 Windows 上
+  是否注册过**尚未实测**，且 Windows 没有 CGEvent 那种按键注入能力
+- **状态判定**靠投影侧信号 + 「文件刚被写过」这个启发式 —— 真实事件流里
+  `type` 只有 `session` 一种，没有 `tool/call` 之类（174 份真实投影实测）
+- **自动安装的下载环节**有 29 项断言但没真跑过（release 里还没有 win 附件）
 
-- DSH 设置 → 🏝️ 灵动岛 里能开关各项设置（这些配置照样落盘，
-  macOS 版会读到 —— 同一份文件，跨机器同步配置也自然）
-- 会话头部的 🏝️ 按钮能开关刘海（对 macOS 有效）
-- 本机桥在跑，`curl http://127.0.0.1:47311/health` 有响应
-
-但**屏幕上不会有状态栏**。
+> **测试套件本身也有平台坑，已修**：判平台相关的断言以前要么写死 macOS 路径
+> （`/usr/bin/ps`、`/usr/bin/curl`、`/usr/bin/ditto`、`/usr/bin/file`），
+> 要么依赖 `process.platform` 而在 Windows 上走了另一条分支。后果是
+> `node test/run.mjs installdl` 在 Windows 上**直接崩**（`spawnSync ... EBUSY`），
+> 而 `T1/T2` 会拿 macOS 的 `.app` 夹具去跑 Windows 安装路径、报出一堆假红。
+> 现在改成：命令走 PATH 解析（找不到就如实报告，不崩）、二进制架构自己读文件头
+> （Mach-O / PE）、`installdl` 的 T1–T4 全部显式钉 `platform:'darwin'` +
+> `nodeArch`。**Windows 上的沙箱仍会拒起 `curl.exe`（EBUSY）**，
+> 这一条会诚实地红成「本机验不了下载链路」，而不是崩。
 
 
 ## ✨ 它能看到什么
@@ -237,10 +279,14 @@ Windows 版的状态栏原本是**窗口内的 DOM 覆盖层**（`.platform-wind
 
 ---
 
-## 🖥️ 一处状态栏：物理刘海
+## 🖥️ 状态栏本体：两个平台的两个 app
 
-状态栏现在**只有一处** —— macOS 屏幕顶端的物理刘海（`DSHNotch.app`，NSPanel）。
-系统级，切到任何 App 都可见。
+| 平台 | 形态 | 位置 |
+| :--- | :--- | :--- |
+| macOS | `DSHNotch.app`（Swift / NSPanel） | 屏幕顶端的物理刘海 |
+| Windows | `DSHNotch.exe`（Electron 无边框置顶小窗 + 托盘） | 屏幕顶端居中 |
+
+都是**系统级**的，切到任何 App 都可见。
 
 插件（`lib/`）不再往 DSH 窗口里画东西了。它保留三件事，缺一不可：
 
@@ -560,8 +606,8 @@ deepisland/
 ### 测试
 
 ```bash
-node test/run.mjs all         # 265 项 Node 断言：注册链路、容错、事件扫描、子代理、跳转桥两端、配置持久化
-node test/run.mjs installdl    # 18 项：要联网，真下载 Release 并验 SHA256（约 30s，不进 all）
+node test/run.mjs all         # 313 项 Node 断言：注册链路、容错、事件扫描、子代理、跳转桥两端、配置持久化
+node test/run.mjs installdl    # 15 项：T1–T4 离线（15 项），T5 要联网真下载 Release 验 SHA256（约 30s，不进 all）
 node test/run.mjs cfg        # 配置读写的离线语义（默认值 / 坏文件 / 缓存失效 / 白名单）
 ```
 
@@ -573,7 +619,7 @@ node test/run.mjs cfg        # 配置读写的离线语义（默认值 / 坏文�
 | `parse` / `apply` / `subagent` | 101 | 事件流解析、挂载、子代理聚合 |
 | `bridge` | 60 | **服务端桥**：起停、CORS、队列语义、TTL、端口顺延、app 完整性判定 |
 | `bridgeclient` | 27 | **客户端桥**：端到端 `POST /jump → 轮询 → openSession`、降级、停用纪律 |
-| `installdl` | 18 | **自动安装**：不覆盖已装、残缺包不替换、真下载 + 校验 + 篡改检测（需联网） |
+| `installdl` | 15 | **自动安装**：不覆盖已装、残缺包不替换、平台/架构守卫、真下载 + 校验 + 篡改检测（需联网） |
 
 跨语言那一段（Swift `URLSession` → Node 桥）由 `./swift/.build/DSHNotch --self-test-jump`
 在桥跑着时验证，会打印「投递调用正常返回（通=true）」。
@@ -641,11 +687,27 @@ return this.configure(async () => {
 ```
 
 界面调用时传的是 `installBundle(spec, { enabled: false, ... })`，
-于是**跳过了写 `bundles`**。官方 CLI 不传这个参数（`enabled` 为 `undefined`），
-所以 `dsh plugin add` **会自动登记** —— 同一件事，差别只在代码路径。
+于是**跳过了写 `bundles`**。
 
-实测过：在干净 profile 上跑 `dsh plugin add <git 地址>`，
-装完 `bundles` 变成 `["@deepseek-ai/dsh-base", "@dsh-external/dsh-vibe-island"]` ✅
+> ⚠️ **本段曾写着「官方 CLI 不传 `enabled`，所以 `dsh plugin add` 会自动登记」。
+> 那是错的，2026-10-10 在 Windows 11 + DSH 0.2.0-rc.2 上实测推翻。**
+>
+> 真实现（读 `dsh-plugin-manager/lib/types/operations.js` 的 `reconcile()`）：
+> CLI 装完**同样**要写 bundles，它对每个 dependency 调 `bundleManifest()`，
+> 而 `bundleManifest` → `resolveBundleDir()` 在**目录不存在时直接 throw**。
+> 于是一条 `pnpm add` 没成功的安装（dependencies 已写、目录没落地）会让
+> `reconcile` 抛 `cannot resolve profile bundle`，命令以失败告终，
+> 留下「deps 有 / bundles 无 / 目录无」的半吊状态。
+>
+> 更要紧的是 `bundleManifest` 也是**读取 profile** 时的路径 ——
+> 这个半吊状态有可能让下一次启动 DSH 直接抛异常，而不只是「插件没生效」。
+>
+> **所以：跑 `register-bundle.mjs` 不是可选的保险，是必需的收尾。**
+
+实测还发现另一件更要紧的事：**这台机器上两种安装方式都装不进去** ——
+`pnpm add <本地路径>` 与 `pnpm add <git 地址>` 均失败，
+后者报 `[ERR_PNPM_FETCH_404] @deepseek-ai/dsh-compact: Not Found`
+（该包不在公共 npm registry）。详见下方「安装为什么可能失败」。
 
 **而且界面上本来就有「立即启用」按钮**（装完的对话框里）——
 它调的就是 `setBundleEnabled(name, true)`，等于补登记。
