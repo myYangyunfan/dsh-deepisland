@@ -4,12 +4,35 @@ This file provides guidance to CodeBuddy Code when working with code in this rep
 
 ## Project Overview
 
-`@dsh-external/dsh-vibe-island` (DSH VibeIsland) is an external plugin for DeepSeek Harness (DSH). It provides a real-time status bar ("Dynamic Island") at the top of the interface, displaying agent thinking states, tool calls, and subagent progress across macOS (physical notch fitting) and Windows (Fluent acrylic pill).
+`@dsh-external/dsh-vibe-island` (DSH VibeIsland) is an external plugin for DeepSeek Harness (DSH). It provides a real-time status bar ("Dynamic Island") displaying agent thinking states, tool calls, and subagent progress.
+
+The island itself is a **separate native app per platform**, not in-window DOM:
+
+| Platform | Island app | Form |
+| :--- | :--- | :--- |
+| macOS | `swift/` → `DSHNotch.app` | NSPanel fitting the physical notch |
+| Windows | `windows/` → `DSHNotch.exe` | Electron frameless always-on-top window + tray |
+
+The plugin (`lib/`) is only the **control plane + channel**: settings panel, the
+`127.0.0.1:47311` jump bridge, and auto-install of the platform app.
 
 ## Development & Verification Commands
 
 This repository does not use a build step or bundling pipeline; code is written in vanilla ES modules directly consumed by the DeepSeek Harness runtime.
 
+- **Windows island** (`windows/`, separate Electron sub-project — own `package.json`,
+  CommonJS, not affected by the root `type: module`):
+  ```bash
+  cd windows
+  npm install
+  npm run electron:install   # Electron >=42 dropped binary download from postinstall
+  npm test                   # 248 assertions: data layer, status inference, bridge, jump
+  npm start                  # runs the real island
+  npm run dist               # -> dist/DSHNotch-<ver>-win-x64.zip + NSIS installer
+  node scripts/probe.js      # feed real ~/.dsh data, print what the monitor decides
+  ```
+  Electron must be **>= 42**: session files are zstd-compressed and decoded with
+  Node's built-in `zlib.zstdDecompressSync`, which Electron 33 (Node 20) lacks.
 - **Syntax check**:
   ```bash
   node -c lib/index.js lib/client.js
@@ -63,6 +86,8 @@ deepisland/
 ├── lib/
 │   ├── index.js             # Server-side Cordis plugin (settings namespace registration)
 │   └── client.js            # Client-side bundle (DOM injection, UI components, event parser)
+├── swift/                   # macOS island app (DSHNotch.app)
+├── windows/                 # Windows island app (DSHNotch.exe, Electron >=42)
 ├── test/                    # Dependency-free Node test suite (see Commands above)
 └── README.md                # Project documentation and import instructions
 ```
