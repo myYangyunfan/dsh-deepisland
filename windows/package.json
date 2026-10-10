@@ -1,30 +1,49 @@
 {
   "name": "dsh-notch-windows",
   "productName": "DSHNotch",
-  "version": "0.1.0",
-  "description": "DSH 智能体刘海灵动岛 · Windows 版",
-  "private": true,
+  "version": "1.1.0",
+  "description": "DSH（DeepSeek Harness）灵动岛 · Windows 端",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron .",
+    "start": "node scripts/dev.js",
     "test": "node test/run.js",
-    "dist": "electron-builder --win --x64"
+    "icons": "node scripts/make-icons.js",
+    "electron:install": "install-electron",
+    "dist": "electron-builder --win --x64",
+    "dist:dir": "electron-builder --win --x64 --dir",
+    "sums": "node scripts/make-sums.js"
   },
   "devDependencies": {
-    "electron": "^33.0.0",
-    "electron-builder": "^25.0.0"
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3",
+    "install-electron": "^1.0.0"
   },
   "build": {
     "appId": "com.dshnotch.windows",
     "productName": "DSHNotch",
-    "files": ["src/**/*", "package.json"],
+    "icon": "assets/icon.ico",
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
     "win": {
-      "target": ["nsis"],
-      "artifactName": "DSHNotch-${version}-win-${arch}.zip"
+      "target": [
+        "nsis",
+        "zip"
+      ],
+      "artifactName": "DSHNotch-${version}-win-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "shortcutName": "DSHNotch"
+    },
+    "directories": {
+      "output": "dist"
     }
   }
 }
