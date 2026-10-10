@@ -10,6 +10,7 @@
 // 期望看到「投递调用正常返回（通=true）」；桥不在时是 false（降级，正常）。
 // 完事记得关：kill %1  或  pkill -f serve-bridge
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -22,7 +23,7 @@ fs.writeFileSync(path.join(shim, 'index.js'),
   "const node=()=>{const s={};for(const m of ['default','description','step','min','max','readonly'])s[m]=()=>s;return s;};\n"
   + "export default {object:node,union:node,boolean:node,number:node,natural:node,string:node,const:node};\n");
 
-const mod = await import(path.join(ROOT, 'lib', 'index.js'));
+const mod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href);
 const bridge = await mod.startBridge({ port: Number(process.argv[2] || 47311), log: (m) => console.log('[bridge] ' + m) });
 if (!bridge) { console.error('桥起不来'); process.exit(1); }
 console.log('[bridge] READY port=' + bridge.port);
