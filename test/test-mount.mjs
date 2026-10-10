@@ -96,16 +96,38 @@ console.log('\n=== T4: 本机 profile 注册状态（回答「装完能不能直
 {
   const profilesDir = path.join(os.homedir(), '.dsh', 'profiles');
   let profile = 'desktop';
-  // 宿主进程命令行第 4 段是 profile 路径
+  // 宿主进程命令行里带 profiles/<name> 的那个就是正在跑的 profile。
+  //
+  // 跨平台：macOS 用 /bin/ps；Windows 用 powershell.exe 读 Win32_Process
+  // （wmic 在新版 Windows 已废弃）。两层都失败就用默认 desktop。
+  // ⚠️ 这里以前只有 /bin/ps：Windows 上 execFileSync 抛 ENOENT 被 catch 吞掉，
+  // 于是**永远**退回 desktop —— DSH 若跑的是 web/headless，下面三条断言
+  // 全部指向错误的 profile，测试会报「插件没装」而其实只是找错目录。
   try {
     const { execFileSync } = await import('node:child_process');
-    const out = execFileSync('/bin/ps', ['-ax', '-o', 'command'], { encoding: 'utf8' });
-    for (const line of out.split('\n')) {
-      if (!line.includes('dsh-desktop-host')) continue;
-      const mm = line.match(new RegExp(path.join(profilesDir) + '[\\/]([^\\/\\s]+)'));
-      if (mm) { profile = mm[1]; break; }
+    const attempts = process.platform === 'win32'
+      ? [
+          { cmd: 'powershell.exe', args: ['-NoProfile', '-Command',
+            'Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine'] },
+          { cmd: 'wmic.exe', args: ['process', 'get', 'CommandLine'] },
+        ]
+      : [{ cmd: '/bin/ps', args: ['-ax', '-o', 'command='] }];
+    let out = null;
+    for (const a of attempts) {
+      try { out = execFileSync(a.cmd, a.args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 10_000 }); break; }
+      catch { /* 换下一个 */ }
     }
-  } catch { /* ps 受限 → 用默认 */ }
+    if (out) {
+      const esc = path.join(profilesDir).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      for (const line of out.split(/\r?\n/)) {
+        if (!line.includes('dsh-desktop-host')) continue;
+        const mm = line.match(new RegExp(esc + '[\\\\/]([^\\\\/\\s]+)'));
+        if (mm) { profile = mm[1]; break; }
+      }
+    } else {
+      console.log('     （读不到宿主进程列表 → 按约定查 desktop；要查别的 profile 就手动改这里）');
+    }
+  } catch { /* 受限 → 用默认 */ }
 
   const dir = path.join(profilesDir, profile);
   console.log(`     DSH 在跑的 profile：${profile}`);
@@ -190,9 +212,20 @@ console.log('\n=== T5: 登记脚本（用户唯一要做的动作）===');
       check("CLI 失败时有兜底（直接改 manifest）", sh2.includes("bak-register"));
     }
 
-    check('setup.command 是可执行的（双击才会跑）',
-      (fs.statSync(s2).mode & 0o111) !== 0,
-      'mode=' + (fs.statSync(s2).mode & 0o777).toString(8));
+    // 可执行位只在 POSIX 上存在。NTFS 不做这件事 —— `mode` 恒为 666，
+    // 和「有没有设过 +x」无关。所以这条在 Windows 上**测不出任何东西**：
+    // 真判它就会永红（本仓库 2026-10-10 起就是这样），假判它就等于不测。
+    //
+    // 处置：只在 POSIX 上判；Windows 上改为「明确记录跳过」，让日志里
+    // 看得见这条没被验证，而不是伪装成通过。
+    const mode = fs.statSync(s2).mode & 0o777;
+    if (process.platform === 'win32') {
+      console.log('  ⏭️  setup.command 的可执行位在 Windows 上不成立（NTFS 无 +x，mode=' +
+        mode.toString(8) + '），本平台跳过');
+    } else {
+      check('setup.command 是可执行的（双击才会跑）',
+        (mode & 0o111) !== 0, 'mode=' + mode.toString(8));
+    }
     check('setup.command 自己找 profile（不要求用户填）',
       /dsh-desktop-host/.test(sh) && /PROFILES/.test(sh));
     check('setup.command 提示要重启 DSH', /重启/.test(sh));
