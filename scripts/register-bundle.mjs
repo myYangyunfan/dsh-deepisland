@@ -48,6 +48,7 @@ const explicit = args.find((a) => !a.startsWith('-'));
 const HOME = os.homedir();
 const PROFILES = path.join(HOME, '.dsh', 'profiles');
 const SELF = 'scripts/register-bundle.mjs';
+const DEFAULT_PROFILE = 'desktop';
 
 function allProfiles() {
   try {
@@ -57,19 +58,51 @@ function allProfiles() {
   } catch { return []; }
 }
 
-/** 猜 DSH 在跑哪个 profile：宿主进程命令行第 4 段是 profile 路径。 */
+/**
+ * 列出宿主的命令行，找 `dsh-desktop-host ... <profiles>/<name>` 里的 name。
+ *
+ * 跨平台：macOS 用 `ps -ax -o command=`，Windows 用 `wmic process get CommandLine`
+ * （Win10+ 自带；本仓库实测受限环境下 wmic 可能被禁，所以两层都做、
+ * 任何一层失败都退回「猜默认 profile」而不是抛错）。
+ *
+ * ⚠️ 这里以前只调 `/bin/ps`：Windows 上该路径不存在 → execFileSync 抛 ENOENT，
+ * 被 catch 吞掉 → **永远**退回 'desktop'。多 profile 机器上如果 DSH 跑的是
+ * web/headless，就会把登记写进错误的 profile，且脚本全程一声不吭。
+ */
+function hostCommandLines() {
+  const attempts = process.platform === 'win32'
+    ? [
+        // PowerShell 走 Get-CimInstance（wmic 在新版本 Windows 已废弃）
+        { cmd: 'powershell.exe', args: ['-NoProfile', '-Command',
+          'Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine'] },
+        { cmd: 'wmic.exe', args: ['process', 'get', 'CommandLine'] },
+      ]
+    : [{ cmd: '/bin/ps', args: ['-ax', '-o', 'command='] }];
+
+  for (const { cmd, args } of attempts) {
+    try {
+      return execFileSync(cmd, args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 10_000 });
+    } catch { /* 换下一个 */ }
+  }
+  return null;
+}
+
+/** 猜 DSH 在跑哪个 profile：宿主进程命令行里带 profiles/<name> 的那个。 */
 function detectProfile() {
   if (explicit) return explicit;
-  try {
-    const out = execFileSync('/bin/ps', ['-ax', '-o', 'command'], { encoding: 'utf8' });
+  const out = hostCommandLines();
+  if (out) {
     const esc = path.join(PROFILES).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    for (const line of out.split('\n')) {
+    for (const line of out.split('\r?\n')) {
       if (!line.includes('dsh-desktop-host')) continue;
-      const m = line.match(new RegExp(esc + '[\\/]([^\\/\\s]+)'));
+      const m = line.match(new RegExp(esc + '[\\\\/]([^\\\\/\\s]+)'));
       if (m) return m[1];
     }
-  } catch { /* ps 受限 */ }
-  return 'desktop';
+  }
+  // 探测失败/宿主没在跑：不是无声无息，而是提示用户可显式指定。
+  console.log('ℹ️  没探测到在跑的 DSH 宿主进程，按约定使用 ' + DEFAULT_PROFILE + '。');
+  console.log('   若 DSH 跑的是别的 profile，请显式指定：node ' + path.basename(SELF) + ' <profile>');
+  return DEFAULT_PROFILE;
 }
 
 /** 复刻宿主 packageDirFromAnchor：按包名在 profile 的 node_modules 下找。 */
@@ -188,6 +221,19 @@ fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
 console.log('\n✅ 已加入 dsh.profile.bundles：');
 for (const b of manifest.dsh.profile.bundles) console.log('     · ' + b);
 console.log(`   备份：${backup}`);
-console.log('\n👉 重启 DSH Desktop 后生效。然后确认：');
-console.log(`   cat ${JSON.stringify(path.join(HOME, 'Library/Application Support/DSHNotch/bridge.json'))}`);
-console.log('   桥起来了会出现这个文件；macOS 上还会自动把 DSHNotch.app 装好。');
+console.log('\n👉 重启 DSH Desktop 后生效。然后确认桥起来了：');
+// 这里原来硬编码 macOS 的 ~/Library/Application Support/DSHNotch/bridge.json。
+// Windows 上照抄会让人去 cat 一个永远不存在的路径 → 以为桥没起来。
+// 必须跟桥客户端用同一套目录推导（见 lib/index.js 的 appDataDir）。
+{
+  const appData = process.env.APPDATA;
+  const bridgeJson = process.platform === 'win32'
+    ? path.join(appData || path.join(HOME, 'AppData', 'Roaming'), 'DSHNotch', 'bridge.json')
+    : process.platform === 'darwin'
+      ? path.join(HOME, 'Library', 'Application Support', 'DSHNotch', 'bridge.json')
+      : path.join(process.env.XDG_DATA_HOME || path.join(HOME, '.local', 'share'), 'DSHNotch', 'bridge.json');
+  console.log('   ' + JSON.stringify(bridgeJson) + '  （存在即桥起来了）');
+}
+if (process.platform === 'darwin') {
+  console.log('   macOS 上还会自动把 DSHNotch.app 装好。');
+}
