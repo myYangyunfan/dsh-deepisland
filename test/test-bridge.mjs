@@ -6,7 +6,7 @@
 // （lib/index.js），跑在 DSH 的 Node 宿主进程里，与渲染进程无关。
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -54,7 +54,7 @@ const check = (name, cond, extra = '') => {
 ensureSchemasteryShim();
 let mod;
 try {
-  mod = await import(path.join(ROOT, 'lib', 'index.js'));
+  mod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href);
 } finally {
   dropSchemasteryShim();
 }
