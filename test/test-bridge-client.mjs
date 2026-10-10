@@ -6,7 +6,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -22,13 +22,21 @@ const ROOT = path.resolve(__dirname, '..');
 // **别改成删真实文件后「恢复备份」—— 备份期间进程被杀照样丢。**
 const REAL_HOME = process.env.HOME;
 const REAL_USERPROFILE = process.env.USERPROFILE;
+const REAL_APPDATA = process.env.APPDATA;
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-island-test-home-'));
 process.env.HOME = TEST_HOME;
 process.env.USERPROFILE = TEST_HOME;
+// Windows 上 appDataDir() 先读 %APPDATA% —— 不一起改掉的话，测试会写进
+// **用户真实的** %APPDATA%\DSHNotch\client-config.json（本轮在 Windows 上实测
+// 踩到：断言「配置路径在临时 HOME 内」直接红了，说明它正往真环境写）。
+if (process.platform === 'win32') {
+  process.env.APPDATA = path.join(TEST_HOME, 'AppData', 'Roaming');
+}
 const restoreHome = () => {
   if (REAL_HOME === undefined) delete process.env.HOME; else process.env.HOME = REAL_HOME;
   if (REAL_USERPROFILE === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = REAL_USERPROFILE;
+  if (REAL_APPDATA === undefined) delete process.env.APPDATA; else process.env.APPDATA = REAL_APPDATA;
   try { fs.rmSync(TEST_HOME, { recursive: true, force: true }); } catch { /* ignore */ }
 };
 // 用 exit 钩子而不是只在末尾调用：中途断言抛异常也要把 HOME 还回去。
@@ -55,7 +63,7 @@ const dropShim = () => {
 
 let server, mod;
 try {
-  server = await import(path.join(ROOT, 'lib', 'index.js'));
+  server = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href);
   // harness.mjs 是副作用导入：它执行 client.js、把 factory 产物挂到 __mod
   await import('./harness.mjs');
   mod = globalThis.__mod;
@@ -353,7 +361,9 @@ console.log('\n=== T6: 设置持久化 —— 复现并锁死「开关点不动�
     got.body.config && got.body.config.enabled === false && got.body.config.glowEffect === false,
     JSON.stringify(got.body.config));
 
-  const cfgFile = path.join(os.homedir(), 'Library', 'Application Support', 'DSHNotch', 'client-config.json');
+  // 路径按平台算（Windows 是 %APPDATA%\DSHNotch，不是 ~/Library/...）。
+  // 写死 macOS 形状的话，Windows 上这条断言红了反而说明它正往真环境写。
+  const cfgFile = server.configFilePath();
   // 守死「测试不碰用户真实环境」这条线：这个路径必须落在临时 HOME 内。
   // 它曾经就是用户的真实配置路径 —— 测试写它、跑完还删它，
   // 用户跑一次测试设置就没了。这条断言红了就别往下跑。
