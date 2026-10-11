@@ -311,36 +311,34 @@ console.log('\n=== peerDependencies 写法（决定能不能被插件管理器�
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   const peers = pkg.peerDependencies || {};
   const names = Object.keys(peers);
+  const deep = names.filter((n) => n.startsWith('@deepseek-ai/'));
 
-  const wildcards = names.filter((n) => peers[n] === '*' || peers[n] === '' || peers[n] === 'x');
-  check('peerDependencies 里没有裸 *（会让 pnpm 装 latest 远古版 → 404）',
-    wildcards.length === 0,
-    '裸 * 的包：' + wildcards.join(', '));
+  // 参照物：本机 desktop profile 里界面装的 dsh-our-free-model —— 它能正常加载，
+  // 声明方式是 ^4.0.2 / ^0.1.2-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1（多版本 or）。
+  // 照它的样子写，别自创写法。
+  const wildcards = deep.filter((n) => peers[n] === '*' || peers[n] === '' || peers[n] === 'x');
+  check('peerDependencies 里没有裸 *（会跟 latest 装到远古版 → dsh-compact 404）',
+    wildcards.length === 0, wildcards.join(', '));
 
-  // 必须用 workspace:* 而不是精确版本号，这是**两难里的唯一正解**：
-  //
-  //   裸 `*`       → pnpm 跟 latest 走，装到 @deepseek-ai/* 的远古版
-  //                 → 那棵依赖树里有从未发布的 dsh-compact → 404，装不上；
-  //   精确版本号   → 宿主的 evaluatePluginCompatibility 会判不满足
-  //                 → 整个 bundle 被跳过（且无提示），插件装上了也不加载。
-  //
-  // 宿主的 evaluatePluginCompatibility（dsh-app-boot/lib/index.js）把
-  // `workspace:^` / `workspace:~` / `workspace:*` **当作 runtimeVersion 本身**
-  // 来比对，于是恒满足、不触发跳过；而 pnpm 见到 workspace: 协议就知道
-  // 「这是宿主工作区里的包」，不会去 registry 解析。
-  // 两边都不吃亏，所以这是唯一该用的写法。
-  const WORKSPACE_OK = new Set(['workspace:^', 'workspace:~', 'workspace:*']);
-  const deepPeers = names.filter((n) => n.startsWith('@deepseek-ai/'));
-  const badRange = deepPeers.filter((n) => !WORKSPACE_OK.has(peers[n]));
-  check('@deepseek-ai/* 全部用 workspace: 协议（宿主不跳过 + pnpm 不查 registry）',
-    badRange.length === 0,
-    badRange.map((n) => n + '=' + peers[n]).join(', '));
+  const ws = deep.filter((n) => peers[n].startsWith('workspace:'));
+  check('不用 workspace: 协议（profile 若无 workspace 定义，pnpm 不解析，链接链断）',
+    ws.length === 0, ws.join(', '));
 
-  check('cordis 也是 workspace:（否则同样触发兼容性跳过）',
-    WORKSPACE_OK.has(peers['@deepseek-ai/cordis']), String(peers['@deepseek-ai/cordis']));
-  check('没有把宿主包写成精确版本号（会被兼容性检查拦下，插件静默不加载）',
-    deepPeers.every((n) => !/^\d/.test(peers[n])),
-    deepPeers.filter((n) => /^\d/.test(peers[n])).map((n) => n + '=' + peers[n]).join(', '));
+  const pinned = deep.filter((n) => /^\d/.test(peers[n]));
+  check('@deepseek-ai/* 不用裸精确版本（宿主版本升一个小版本就整bundle 被跳过）',
+    pinned.length === 0, pinned.map((n) => n + '=' + peers[n]).join(', '));
+
+  const ors = deep.filter((n) => peers[n].includes('||'));
+  check('rc 包用多版本 or（照 dsh-our-free-model 的写法，容纳 rc 演进）',
+    ors.length >= 3, ors.length + ' 个用了 ||');
+
+  check('dsh-client-ui-* 覆盖 0.2.0-rc.2（当前 DSH 版本）',
+    ['@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-client-ui-settings',
+     '@deepseek-ai/dsh-client-ui-slots'].every((n) => peers[n].includes('0.2.0-rc.2')),
+    String(peers['@deepseek-ai/dsh-client-ui-settings']));
+  check('schemastery 用 ^3.18.4（公共 registry 的 latest 就是它）',
+    peers['@deepseek-ai/schemastery'] === '^3.18.4',
+    String(peers['@deepseek-ai/schemastery']));
 }
 
 console.log('\n' + '='.repeat(50));
