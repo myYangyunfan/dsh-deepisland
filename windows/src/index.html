@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DSHNotch</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!--
+    岛的本体。宽 380 / 高由内容决定 —— 渲染层量完高度回传给主进程改窗口尺寸，
+    保证透明窗口的矩形**紧贴内容**，不让空白处吃掉鼠标点击。
+
+    ## 为什么顶上多了一段 .neck（连接器）
+
+    macOS 上物理刘海是个方角矩形缺口，岛是它的延伸（见 swift/UI/NotchShape.swift）。
+    Windows 屏幕没有刘海，直接画个悬浮的黑药丸只会像「贴了个膏药」——
+    缺了「它从屏幕顶部长出来」这个视觉锚点。
+
+    .neck 就是补这个锚点：一段**顶边平直、顶部两角为方角**的延伸，
+    配合主进程把窗口 y 设为负值（见 main.js 的 NECK_OVERHANG），
+    这段会有一部分跑到屏幕顶边**之外**去 —— 露在外面的那截本来就是屏幕外，
+    谁也看不见，于是方角自然消失，整块读作「从屏幕边缘长出来的一块」。
+
+    两端因此形状一致：顶平 + 底圆角。
+  -->
+  <div id="island" class="island">
+    <div class="neck" aria-hidden="true"></div>
+    <div id="pinned-hint" class="pinned-hint"></div>
+    <div id="primary" class="primary"></div>
+    <div id="list" class="list"></div>
+    <div id="stats" class="stats"></div>
+    <div id="footer" class="footer"></div>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>

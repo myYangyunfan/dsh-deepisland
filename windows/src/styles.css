@@ -1,0 +1,319 @@
+/* DSHNotch（Windows）—— 岛的样式。
+ *
+ * 配色与状态色沿用 Swift 版（#4E7CFF 思考 / #00D2AA 执行 / #FFAA00 待确认 /
+ * #4ADE80 完成 / #50505A 待命），保证两端看起来是同一个东西。
+ *
+ * ## 形状为什么是「顶平 + 底圆角」
+ *
+ * 照抄 swift/UI/NotchShape.swift 的结论：顶边平直压在屏幕顶边之外，
+ * 方角落在屏幕外没人看得见，整体读作「从屏幕顶边长出来的一块」。
+ * 若顶端离屏幕顶边还有距离，方角就暴露在画面里，立刻变成「悬浮的黑盒子」。
+ * Windows 没有物理刘海，靠 .neck + 窗口负偏移复刻这个效果（见 index.html 注释）。
+ */
+
+:root {
+  --scale: 1;
+  --bg: rgba(14, 14, 18, 0.94);
+  --border: rgba(255, 255, 255, 0.09);
+  --text: #EDEDF2;
+  --text-dim: #9A9AA8;
+  --text-faint: #6A6A78;
+  --row-hover: rgba(255, 255, 255, 0.06);
+  --glow: #50505A;
+
+  /* 折叠/展开的过渡。与 Swift 的 .spring(response:0.34, dampingFraction:0.8)
+     观感对齐 —— CSS 没有弹簧，这里用略带回弹的 cubic-bezier 近似：
+     末段稍微过冲一点点，比纯 ease-out 更「有肉」。 */
+  --spring: cubic-bezier(0.22, 1.2, 0.36, 1);
+  --spring-ms: 340ms;   /* 必须与 Swift 的 response 0.34 对齐 */
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 整块内容按配置缩放，主进程把窗口也乘同一个系数 —— 两边必须一致，
+   否则会出现「窗口比内容大一圈」的透明空白。 */
+.island {
+  width: 380px;
+  transform: scale(var(--scale));
+  transform-origin: top left;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  /* 只有底部两角圆；顶部交给 .neck 的方角（压在屏幕顶边之外） */
+  border-radius: 0 0 14px 14px;
+  box-shadow:
+    0 8px 28px rgba(0, 0, 0, 0.45),
+    0 0 0 0.5px rgba(0, 0, 0, 0.6),
+    0 0 18px -6px var(--glow);
+  color: var(--text);
+  user-select: none;
+  cursor: default;
+  -webkit-app-region: drag;   /* 允许拖动窗口（无边框窗口没有标题栏） */
+}
+
+/* ── 连接器：从屏幕顶边「长出来」的那一截 ──
+ *
+ * 用负 margin-top 把这段顶到屏幕顶边**之外**（NECK_OVERHANG 由主进程
+ * 配合窗口负 y 一起决定），露在外面那截谁也看不见，
+ * 于是顶部的方角自然消失 = 与物理刘海延伸同一个读法。
+ *
+ * ⚠️ 这一段必须 `pointer-events: none`：它悬在屏幕顶边上，
+ * 若能接收点击，会在屏幕最顶端凭空吃掉一条 14px 高的点击带
+ * —— 用户点屏幕顶端「最大化按钮附近」会毫无反应，且极难归因。
+ */
+.neck {
+  height: var(--neck-h, 10px);
+  margin-top: calc(-1 * var(--neck-h, 10px));
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  /* 背景要盖住 body 的透明，否则和下面主体之间会有一条缝 */
+  pointer-events: none;
+  transition: height var(--spring-ms) var(--spring),
+              margin-top var(--spring-ms) var(--spring);
+}
+
+/* 展开时颈部略微收窄 —— 药丸「张开」的观感。
+   不收窄也行，但少了这0.5px 的变化，展开就只是「长高」而不是「张开」。 */
+.island[data-expanded="1"] .neck {
+  --neck-h: 6px;
+  height: 6px;
+  margin-top: -6px;
+  border-radius: 0;
+}
+
+/* 内容区统一做一次过渡：展开时列表/指标淡入并轻微上浮 */
+.primary, .list, .stats, .footer, .pinned-hint {
+  transition: opacity var(--spring-ms) var(--spring),
+              transform var(--spring-ms) var(--spring);
+}
+
+/* 折叠时把非主行压掉：先淡出再收高，避免「文字还在但被裁掉」的中间态 */
+.island[data-expanded="0"] .list,
+.island[data-expanded="0"] .stats,
+.island[data-expanded="0"] .pinned-hint {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.island[data-expanded="1"] .list,
+.island[data-expanded="1"] .stats,
+.island[data-expanded="1"] .pinned-hint {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* 折叠态去掉内边距上/下里的视觉冗余（.primary 已有固定高度） */
+.island { padding: 0 12px; }
+.island > .pinned-hint { padding-top: 8px; }
+.island > .primary { margin-top: 8px; }
+.island[data-expanded="0"] > .primary { margin-bottom: 8px; }
+
+/* 展开时底部留白；折叠时由 .primary 的 margin-bottom 补 */
+.island > .footer { padding-bottom: 8px; }
+
+/* ───────────────── 主行（折叠态只显示这一行） ───────────────── */
+
+.primary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 28px;
+  -webkit-app-region: no-drag;
+  cursor: pointer;
+}
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--glow);
+  flex: 0 0 auto;
+  box-shadow: 0 0 8px 1px var(--glow);
+  /* 光晕跟着 --glow 一起变，颜色切换不突兀（否则思考→执行时是硬跳） */
+  transition: background-color .25s ease, box-shadow .25s ease;
+  /* pulse 里用了 scale()，不钉住原点的话圆点会朝某个角缩、看起来在抖 */
+  transform-origin: center;
+}
+
+/* 在跑的时候给个点呼吸动画 —— 静止的点让人分不清「在跑」和「卡住」 */
+.dot.live { animation: pulse 1.5s ease-in-out infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.42; transform: scale(0.82); }
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.badge {
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 7px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.badge.accent {
+  color: var(--glow);
+  border-color: var(--glow);
+}
+
+/* ───────────────── 会话列表（展开态） ───────────────── */
+
+.list {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.list:empty { display: none; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 8px;
+  -webkit-app-region: no-drag;
+  cursor: pointer;
+}
+
+.row:hover { background: var(--row-hover); }
+
+.row .label {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.row .tag {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.row .mini {
+  font-size: 10px;
+  color: var(--text-faint);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.row.idle .label { color: var(--text-dim); }
+
+/* ───────────────── 指标区 ───────────────── */
+
+.stats {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
+
+.stats:empty { display: none; }
+
+.stat b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.stat.warn b { color: #FFAA00; }
+.stat.danger b { color: #FF6B6B; }
+
+/* ───────────────── 底部（跳转反馈 / 桥状态） ───────────────── */
+
+.footer {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.footer:empty { display: none; }
+
+.footer .jump { color: #4ADE80; }
+.footer .jump.failed { color: #FF6B6B; }
+
+/* 右侧的「设置」等可点文字。 */
+.footer .foot-left { display: inline-flex; align-items: center; }
+.footer .link {
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  /* 岛整体是拖拽区，可点元素必须显式排除，否则点下去变成拖窗口 */
+  -webkit-app-region: no-drag;
+  transition: color .12s ease, background-color .12s ease;
+}
+.footer .link:hover { color: var(--text); background: rgba(255,255,255,.08); }
+
+.bridge-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 4px;
+  background: #50505A;
+}
+
+.bridge-dot.on { background: #4ADE80; }
+
+/* 桥活着但队列里压着没被消费的跳转 —— 橙色，
+   区别于绿色（一切正常）和红色（桥没起）。
+   这是「用户点了岛但 DSH 没切过去」唯一的可视线索。 */
+.pending { color: #FFAA00; }
+
+/* ───────────────── 钉住提示 ───────────────── */
+
+.pinned-hint {
+  font-size: 9.5px;
+  color: var(--text-faint);
+  text-align: center;
+  margin-bottom: 4px;
+}
+
+.pinned-hint:empty { display: none; }
+
+/* 空态：一个会话都没有时给个说得清的提示，而不是空白 */
+.empty {
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+  padding: 4px 0;
+}
