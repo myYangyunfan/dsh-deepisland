@@ -64,11 +64,40 @@ console.log('\n=== T2: peerDependencies 兼容性（宿主会跳过不满足的 
   const peers = Object.entries(pkg.peerDependencies || {});
   const checked = peers.filter(([n]) => n === '@deepseek-ai/dsh' || n.startsWith('@deepseek-ai/dsh-'));
   check('peerDependencies 是对象', Array.isArray(checked));
+  // 判定方式改为**用 semver 实算**，而不是「只认*」。
+  //
+  // 之前的断言只接受 "*"/"workspace:*"/"workspace:^"/"workspace:~"，
+  // 于是把人引到「必须用 workspace:^」—— 但那条路在**没有 pnpm-workspace.yaml 的
+  // profile 上会让 pnpm 不解析 peer，链接链断在最后一步**（实体在 .pnpm 里、
+  // 顶层 symlink 没建，宿主报 cannot resolve profile bundle）。
+  //
+  // 正确参照物在本机 desktop profile 里：界面装的 dsh-our-free-model
+  // 声明的是 ^0.1.2-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1，
+  // 覆盖了宿主当前版本 0.2.0-rc.2，所以能正常加载。
+  // → **多版本 or 才是这套宿主认可的写法。**
+  const RUNTIME = '0.2.0-rc.2';
+  const sat = (range) => {
+    // 宿主用的是 semver.satisfies(v, range, {includePrerelease: true})。
+    // 这里用宿主自带的 semver，避免自己实现一套近似逻辑（近似= 断言不可信）。
+    try {
+      // semver 从宿主安装目录拿（它是判定方，用自己的实现才有可比性）。
+      // 找不到就退回宽松判定 —— 断言退让总比误报好，但不能没有。
+      const hostSemver = [
+        'D:/app/DSH Desktop/dsh-desktop/node_modules/semver',
+        'D:/app/DSH Desktop/dsh-desktop/node_modules/@deepseek-ai/dsh/node_modules/semver',
+      ].find((p) => fs.existsSync(p));
+      if (!hostSemver) throw new Error('semver 未找到');
+      const semver = createRequire(import.meta.url)(hostSemver);
+      return semver.satisfies(RUNTIME, range, { includePrerelease: true });
+    } catch {
+      // 找不到宿主 semver 就退回宽松判定：只挡明显的裸精确版本
+      return !/^\d+\.\d+\.\d+$/.test(range);
+    }
+  };
   for (const [n, r] of checked) {
-    // "*" / "workspace:*" 对任意版本都满足（含 0.2.0-rc.2 这种 prerelease）
-    const safe = r === '*' || r === 'workspace:*' || r === 'workspace:^' || r === 'workspace:~';
-    check(`peer ${n} = "${r}" 不会被兼容性检查拦下`, safe,
-      '写成具体版本号会在宿主版本不匹配时整个 bundle 被跳过（且无提示）');
+    check(`peer ${n} = "${r}" 满足宿主 ${RUNTIME}（不满足则整个 bundle 被静默跳过）`,
+      sat(r),
+      '宿主 evaluatePluginCompatibility 判不通过时，插件装上了也不会加载且无提示');
   }
   // engines 字段宿主**不读**（跳过只看 peerDependencies）。它只是给 pnpm 看的，
   // 写窄了不会导致 bundle 被跳过，所以这里只记录事实、不作断言。
