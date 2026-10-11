@@ -19,7 +19,8 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  release-macos:
+    name: macOS (arm64)
     # 带刘海的 Mac 全是 Apple Silicon，产物必须是 arm64，所以要求 arm64 runner。
     runs-on: macos-14
     steps:
@@ -77,4 +78,99 @@ jobs:
           || gh release upload "$TAG" \
             .build/dist/*.zip .build/dist/SHA256SUMS.txt --clobber
           echo "--- 发布结果 ---"
+          gh release view "$TAG"
+
+  release-windows:
+    name: Windows (x64)
+    runs-on: windows-latest
+    # 依赖 mac 那条先建出 release：本 job 只是**追加**附件（zip/exe + 合并后的
+    # SHA256SUMS.txt）。并行跑会抢在 release 存在之前去 upload，直接失败。
+    needs: release-macos
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 版本必须与 tag 一致
+        # 插件按 `DSHNotch-<release 版本>-win-<arch>.zip` 去找附件：
+        # tag 是 v1.1.0 而包里写 0.1.0 的话，产物名就对不上，
+        # 自动安装会一路报「两个源都取不到 SHA256SUMS.txt」—— 不在这里卡住，
+        # 只能等用户在自己机器上撞见。
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          $TAG = if ($env:DISPATCH_TAG) { $env:DISPATCH_TAG } else { $env:GITHUB_REF_NAME }
+          $VER = $TAG -replace '^v',''
+          $PKG = (Get-Content windows/package.json | ConvertFrom-Json).version
+          Write-Host "tag=$TAG  包版本=$PKG"
+          if ($PKG -ne $VER) {
+            Write-Error "windows/package.json 版本 $PKG 与 tag $VER 不一致，先改 windows/package.json"
+            exit 1
+          }
+          Write-Host "✅ 版本一致"
+
+      - name: 安装依赖
+        working-directory: windows
+        run: npm install
+
+      - name: 下载 Electron 二进制
+        # Electron 42 起 postinstall 不再拉二进制，必须显式装一次。
+        # 版本要 ≥42：会话数据是 zstd 压缩的，解码靠 Node 内置
+        # zlib.zstdDecompressSync（Electron 33 = Node 20，没有这个函数）。
+        working-directory: windows
+        run: npm run electron:install
+
+      - name: 自测（数据层 / 状态推断 / 跳转桥）
+        working-directory: windows
+        run: npm test
+
+      - name: 打包
+        working-directory: windows
+        run: npm run dist
+
+      - name: 校验产物
+        working-directory: windows
+        run: |
+          Get-ChildItem dist | Format-Table Name, Length
+          $zip = Get-ChildItem dist/*.zip | Select-Object -First 1
+          if (-not $zip) { Write-Error "没有 zip 产物"; exit 1 }
+          Write-Host "产物: $($zip.Name)"
+          # 装的时候判「完整」靠这两件：主程序 + resources/app.asar。
+          # zip 里多一层 win-unpacked，所以按名字匹配而不是按路径。
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $z = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+          $names = $z.Entries.FullName
+          $z.Dispose()
+          $names | Where-Object { $_ -like '*DSHNotch.exe' -or $_ -like '*app.asar' } | ForEach-Object { Write-Host "  $_" }
+          if (-not ($names -like '*DSHNotch.exe')) { Write-Error "包里没有 DSHNotch.exe"; exit 1 }
+          if (-not ($names -like '*resources/app.asar')) { Write-Error "包里没有 resources/app.asar"; exit 1 }
+
+      - name: 上传附件（并把摘要并进 SHA256SUMS.txt）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          $TAG = if ($env:DISPATCH_TAG) { $env:DISPATCH_TAG } else { $env:GITHUB_REF_NAME }
+          # 摘要格式由 scripts/make-sums.js 统一产出（`<64位hex>  两个空格  <文件名>`）。
+          # 不在 CI 里另写一份哈希：三平台的命令行工具输出格式各不相同，
+          # 插件的 parseSums 只认 shasum 那一种形状。
+          node scripts/make-sums.js
+          gh release download "$TAG" -p SHA256SUMS.txt --clobber 2>$null
+          if (Test-Path SHA256SUMS.txt) {
+            # mac 那条先建好了 release：把它的行放前面，win 的接在后面，
+            # 一份文件覆盖两个平台（安装器按文件名在里面找，不关心顺序）。
+            Get-Content SHA256SUMS.txt, dist/SHA256SUMS.txt |
+              Set-Content dist/SHA256SUMS-merged.txt -Encoding utf8
+            Move-Item dist/SHA256SUMS-merged.txt dist/SHA256SUMS.txt -Force
+          }
+          Write-Host "--- 合并后 ---"
+          Get-Content dist/SHA256SUMS.txt
+          # __uninstaller.exe 是 NSIS 的中间产物，不是给用户下的，不上传。
+          $assets = @(Get-ChildItem dist/*.zip, dist/*.exe |
+            Where-Object { $_.Name -notlike '*__uninstaller*' } |
+            ForEach-Object { $_.FullName }) + @((Resolve-Path dist/SHA256SUMS.txt).Path)
+          gh release upload "$TAG" $assets --clobber
+          Write-Host "--- 发布结果 ---"
           gh release view "$TAG"
