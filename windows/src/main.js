@@ -26,11 +26,22 @@ const fs = require('node:fs');
 // 启动追踪（仅 DSH_NOTCH_TRACE=<文件> 时生效）。
 // 打包后的 exe 是 Windows GUI 子系统进程：console.log 一个字都看不到，
 // 「为什么打包产物起不来」就只能靠写文件来问。
-const TRACE = process.env.DSH_NOTCH_TRACE || '';
-const trace = (m) => { if (TRACE) { try { fs.appendFileSync(TRACE, m + '\n'); } catch { /* ignore */ } } };
+const TRACE = path.join(
+  process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData/Roaming'),
+  'DSHNotch',
+  'main.log'
+);
+const trace = (m) => {
+  try {
+    fs.appendFileSync(TRACE, `[${new Date().toISOString()}] ${m}\n`);
+  } catch { /* ignore */ }
+};
 trace('[trace] main.js 载入 packaged=' + app.isPackaged + ' resourcesPath=' + process.resourcesPath);
 process.on('uncaughtException', (e) => { trace('[trace] uncaughtException: ' + (e && (e.stack || e.message))); });
 process.on('unhandledRejection', (e) => { trace('[trace] unhandledRejection: ' + (e && (e.stack || e))); });
+app.on('will-quit', () => trace('[trace] app will-quit'));
+app.on('quit', (e, code) => trace('[trace] app quit code=' + code));
+process.on('exit', (code) => trace('[trace] process exit code=' + code));
 
 const config = require('./config.js');
 const { SessionMonitor } = require('./monitor.js');
