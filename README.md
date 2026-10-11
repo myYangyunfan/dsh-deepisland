@@ -117,6 +117,23 @@ import:  成功，35 ms，apply/inject 都在
 **即：一行命令装完，bundles 自动登记，插件能被加载。** 不需要手动跑
 `register-bundle.mjs` —— 但它仍在包里，作为 CLI 失败时的兜底。
 
+⚠️ **URL 必须写 `https://github.com/...`，不要写 `git+https://...`**：
+带 `git+` 前缀会被 pnpm 转成 `git+ssh://git@github.com/...`，
+走 SSH 通常连不上（实测 `exit 128`）。
+
+⚠️ **两条附注**（都不是本插件的问题，但会让人以为没装好）：
+
+1. **`nodeLinker` 布局影响最终链接**。profile 若是 isolated 布局（默认），
+   pnpm 会把包放进 `node_modules/.pnpm/...` 再建顶层 symlink；
+   本机 `desktop` profile 用的是 `hoisted`（平铺），而 `web` 是 isolated。
+   isolated 下偶发出现「实体在 `.pnpm` 里、顶层 symlink 没建」，
+   于是宿主 `resolveBundleDir` 报 `cannot resolve profile bundle`，
+   但 pnpm 自己显示 `added 4, done`。重跑 `dsh plugin --profile X install`
+   通常能补上；仍不行就删 `pnpm-lock.yaml` 强制重解析。
+2. **`workspace:^` 要求 profile 里有 pnpm workspace 配置**。
+   没有 `pnpm-workspace.yaml` 时，pnpm 仍能装上（实测 peerDependencies
+   原样写进 lockfile），但链接链会断在最后一步 —— 症状同上。
+
 之所以之前跑不通，是 `peerDependencies` 全写 `*`：pnpm 会跟着 npm 的 `latest`
 标签走，而这些 `@deepseek-ai/*` 包的 `latest` 停在远古版本（`dsh-settings` 的
 latest = `0.0.1-rc.1`，DSH 实际用 `0.2.0-rc.2`），那个远古版的依赖树引用了
