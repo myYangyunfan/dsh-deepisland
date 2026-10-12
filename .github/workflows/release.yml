@@ -80,21 +80,41 @@ jobs:
           cd swift
           TAG="${DISPATCH_TAG:-${GITHUB_REF_NAME}}"
           echo "发布 tag: $TAG"
+          # 两条 job 现在**互不依赖**，谁先跑谁建 release。
+          # 若 win 那条先跑完，这里 download 会拿到它已合并好的 SHA256SUMS.txt，
+          # 必须把自己的行并进去再回传，否则会把 win 的摘要整份覆盖掉
+          # —— 插件的 parseSums 是按文件名在里面找，少了就装不了 Windows 包。
+          DIST=.build/dist
+          gh release download "$TAG" -p SHA256SUMS.txt --clobber 2>/dev/null || true
+          if [ -f SHA256SUMS.txt ]; then
+            cat "$DIST/SHA256SUMS.txt" SHA256SUMS.txt | sort -u -k2 > "$DIST/SHA256SUMS-merged.txt"
+            mv "$DIST/SHA256SUMS-merged.txt" "$DIST/SHA256SUMS.txt"
+            echo "--- 合并后 ---"
+            cat "$DIST/SHA256SUMS.txt"
+          fi
           gh release create "$TAG" \
             --title "DSH Notch ${TAG#v}" \
             --generate-notes \
-            .build/dist/*.zip .build/dist/SHA256SUMS.txt \
+            "$DIST"/*.zip "$DIST/SHA256SUMS.txt" \
           || gh release upload "$TAG" \
-            .build/dist/*.zip .build/dist/SHA256SUMS.txt --clobber
+            "$DIST"/*.zip "$DIST/SHA256SUMS.txt" --clobber
           echo "--- 发布结果 ---"
           gh release view "$TAG"
 
   release-windows:
     name: Windows (x64)
     runs-on: windows-latest
-    # 依赖 mac 那条先建出 release：本 job 只是**追加**附件（zip/exe + 合并后的
-    # SHA256SUMS.txt）。并行跑会抢在 release 存在之前去 upload，直接失败。
-    needs: release-macos
+    # ⚠️ 不能写 `needs: release-macos`。
+    #
+    # 曾经的理由是「mac 先建出 release，win 才能 upload 追加」。但那样一来，
+    # **mac 只要失败，Windows 资产就永远发不出去** —— 而 Windows 恰恰是本项目
+    # 侧重点之一。实测撞过一次：mac 那步只是 `swift/build.sh` 缺可执行位，
+    # 结果整条链断在第一步，Windows job 直接显示 0s（未运行），
+    # 症状是「明明推了 tag，Windows 资产却始终没有」。
+    #
+    # 不依赖也能成立：两条 job 的发布命令都是
+    # `create ... || upload ... --clobber`，谁先跑谁建，另一个走 upload 追加，
+    # SHA256SUMS.txt 由 win 侧下载合并后回传，双平台互不阻塞。
     steps:
       - uses: actions/checkout@v4
 
