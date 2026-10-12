@@ -11,11 +11,21 @@ const os = require('node:os');
 
 const SRC = path.join(__dirname, '..', 'src', 'session-source.js');
 
-let pass = 0, fail = 0;
+let pass = 0, fail = 0, skipped = 0;
 const check = (name, cond, detail = '') => {
   if (cond) { pass++; console.log('  ✅ ' + name); }
   else { fail++; console.log('  ❌ ' + name + (detail ? '  → ' + detail : '')); }
 };
+/**
+ * 「本机没有真实数据」时的**跳过**，不是失败。
+ *
+ * 为什么必须有这个：这几项读的是 `~/.dsh/sessions` 下的真会话文件，
+ * 而在 GitHub Actions 的干净 runner 上**一个会话都没有** ——
+ * 实测 CI 因此红了 3 项（session-source）+ 1 项（projections），
+ * 连带把「打包 / 上传 Windows 资产」整条链挡在后面。
+ * 没有真实文件就谈不上有没有Bug，把它算失败纯属冤枉代码。
+ */
+const skip = (name, why) => { skipped++; console.log('  ⏭️  ' + name + '  → ' + why); };
 
 console.log('=== W1: 模块能加载 ===');
 const S = require(SRC);
@@ -35,9 +45,12 @@ check('空/全连字符返回 null', S.prettyProject('') === null && S.prettyPro
 
 console.log('\n=== W3: 会话发现（真实文件）===');
 const files = S.sessionFiles();
-check('能找到会话文件', files.length > 0, '找到 ' + files.length + ' 个');
-if (files.length > 0) {
+if (files.length === 0) {
+  // 见本文件 `skip` 的注释：CI 上没有真实会话，跳过而非判失败。
+  skip('能找到会话文件', '~/.dsh/sessions 下没有真实会话（CI 或未跑过 DSH），跳过');
+} else {
   const f = files[0];
+  check('能找到会话文件', true, '找到 ' + files.length + ' 个');
   check('有 id（= 会话目录名）', typeof f.id === 'string' && f.id.length > 0, f.id);
   check('id 形如 session-<uuid>', /^session-[0-9a-f-]+$/.test(f.id), f.id);
   check('有 project 名', typeof f.project === 'string' && f.project.length > 0, f.project);
@@ -55,14 +68,18 @@ check('按 mtime 倒序', (() => {
   for (let i = 1; i < a.length; i++) if (a[i].mtimeMs > a[i - 1].mtimeMs) return false;
   return true;
 })(), '顺序不是 mtime 倒序');
-check('activeWithin=0 时退化为最新 1 个（面板不空白）',
-  S.sessionFiles({ maxCount: 6, activeWithin: 0 }).length === 1,
-  String(S.sessionFiles({ maxCount: 6, activeWithin: 0 }).length));
+if (files.length === 0) {
+  skip('activeWithin=0 时退化为最新 1 个（面板不空白）', '无真实会话，跳过');
+} else {
+  check('activeWithin=0 时退化为最新 1 个（面板不空白）',
+    S.sessionFiles({ maxCount: 6, activeWithin: 0 }).length === 1,
+    String(S.sessionFiles({ maxCount: 6, activeWithin: 0 }).length));
+}
 
 console.log('\n=== W5: 解压与事件解码（真实数据）===');
 const latest = S.latestSessionFile();
 if (!latest) {
-  check('有真实会话文件可测', false, '~/.dsh/sessions 下没找到，跳过（本机没跑过 DSH？）');
+  skip('有真实会话文件可测', '~/.dsh/sessions 下没找到，跳过（CI 或未跑过 DSH）');
 } else {
   const raw = S.decompress(latest);
   check('zstd 解压成功（Node 内置，无需外部二进制）', typeof raw === 'string' && raw.length > 0,
@@ -143,6 +160,6 @@ console.log('\n=== W6: 目录缺失时的容错 ===');
 }
 
 console.log('\n' + '='.repeat(46));
-console.log('通过 ' + pass + ' / 失败 ' + fail);
+console.log('通过 ' + pass + ' / 失败 ' + fail + (skipped ? ' / 跳过 ' + skipped : ''));
 console.log('='.repeat(46));
 process.exit(fail === 0 ? 0 : 1);

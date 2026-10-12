@@ -7,11 +7,13 @@ const fs = require('node:fs');
 const SRC = path.join(__dirname, '..', 'src', 'projections.js');
 const SS = require(path.join(__dirname, '..', 'src', 'session-source.js'));
 
-let pass = 0, fail = 0;
+let pass = 0, fail = 0, skipped = 0;
 const check = (name, cond, detail = '') => {
   if (cond) { pass++; console.log('  ✅ ' + name); }
   else { fail++; console.log('  ❌ ' + name + (detail ? '  → ' + detail : '')); }
 };
+/** 无真实数据时的跳过。理由与 session-source.test.js 里的 `skip` 相同。 */
+const skip = (name, why) => { skipped++; console.log('  ⏭️  ' + name + '  → ' + why); };
 
 console.log('=== P1: 模块加载与派生量（不依赖真实文件）===');
 const P = require(SRC);
@@ -155,7 +157,11 @@ console.log('\n=== P4: 真实投影文件（命名两种形态 + 兜底）===');
       check('真实投影通常有标题或 token（isEmpty=false）', p && !P.isEmpty(p), '全空');
     }
   }
-  check('至少一个会话能命中投影文件', hit > 0, '命中 ' + hit + '/' + files.length);
+  if (files.length === 0) {
+    skip('至少一个会话能命中投影文件', '~/.dsh/sessions 下无真实会话（CI 或未跑过 DSH），跳过');
+  } else {
+    check('至少一个会话能命中投影文件', hit > 0, '命中 ' + hit + '/' + files.length);
+  }
   if (hit > 0) {
     // 缓存：第二次应极快
     const t0 = Date.now();
@@ -193,6 +199,6 @@ console.log('\n=== P5: 找不到投影时返回 null ===');
 }
 
 console.log('\n' + '='.repeat(46));
-console.log('通过 ' + pass + ' / 失败 ' + fail);
+console.log('通过 ' + pass + ' / 失败 ' + fail + (skipped ? ' / 跳过 ' + skipped : ''));
 console.log('='.repeat(46));
 process.exit(fail === 0 ? 0 : 1);
