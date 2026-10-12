@@ -26,6 +26,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ⚠️ 不能省。`swift/build.sh` 在本仓库的 git 里被记成 100644（无可执行位），
+      # checkout 出来的文件对 CI 的 bash 就是「Permission denied」——
+      # 已实测：正是这一行不通导致整个 macOS job 在第一步就挂，
+      # 而 Windows job 写了 `needs: release-macos`，于是**连带触发不了**，
+      # 症状表面看是「Windows 资产永远不会发布」。
+      # 补 chmod 比改 git 文件模式稳：后者一旦被人误改回 644，这坑会原样复现。
+      - name: 给构建脚本加可执行位
+        run: chmod +x swift/build.sh
+
       - name: 环境信息
         run: |
           sw_vers
