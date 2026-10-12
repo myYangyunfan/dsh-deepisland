@@ -50,6 +50,26 @@ jobs:
           fi
           echo "✅ arm64"
 
+      - name: 产物版本号必须与 tag 一致
+        # 与 Windows 侧同一条纪律：产物名由 `CFBundleShortVersionString` 决定，
+        # 写在 Info.plist 里，跟 tag 是**两份独立的事实**。
+        # 实测事故：tag 打 v1.2.0、plist 里却还是 0.3.0，CI 于是上传了
+        # `DSHNotch-0.3.0-arm64.zip`，插件按 1.2.0 去找，永远找不到。
+        # 不在这里卡死，只能等用户在自己机器上撞见「资产不存在」。
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          cd swift
+          TAG="${DISPATCH_TAG:-${GITHUB_REF_NAME}}"
+          VER="${TAG#v}"
+          PLIST=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist)
+          echo "tag=$TAG  plist版本=$PLIST"
+          if [ "$PLIST" != "$VER" ]; then
+            echo "❌ Resources/Info.plist 版本 $PLIST 与 tag $VER 不一致，先改 Info.plist"
+            exit 1
+          fi
+          echo "✅ 版本一致"
+
       - name: 编译 + 组装 .app + 打包
         env:
           # CI 没有登录图形会话，跳过需要窗口服务器的运行自检；
@@ -186,7 +206,20 @@ jobs:
           # 不在 CI 里另写一份哈希：三平台的命令行工具输出格式各不相同，
           # 插件的 parseSums 只认 shasum 那一种形状。
           node scripts/make-sums.js
-          gh release download "$TAG" -p SHA256SUMS.txt --clobber 2>$null
+
+          # ⚠️ 不能写 `gh release download ... 2>$null`。
+          # Windows runner 的默认 shell 是 **PowerShell 7**（日志里可见
+          # `shell: C:\Program Files\PowerShell\7\pwsh.EXE`），而 PS7 会把
+          # native 命令写往 stderr 的内容当 ErrorRecord 抛出来 ——
+          # `2>$null` 只重定向了流、没拦住 ErrorRecord，于是**即使命令成功**，
+          # 这一步也可能以非零码收场（实测：就是它让上传步骤无故变红）。
+          # 改成：用 -o 把 stderr 收成字符串，失败也不打断，并把原因打出来。
+          $dlErr = (gh release download "$TAG" -p SHA256SUMS.txt --clobber -o _dl_err.txt 2>&1 | Out-String)
+          if (Test-Path _dl_err.txt) {
+            $t = Get-Content _dl_err.txt -Raw -ErrorAction SilentlyContinue
+            if ($t) { Write-Host "下载远端摘要的输出（非致命）: $t" }
+            Remove-Item _dl_err.txt -Force -ErrorAction SilentlyContinue
+          }
           if (Test-Path SHA256SUMS.txt) {
             # mac 那条先建好了 release：把它的行放前面，win 的接在后面，
             # 一份文件覆盖两个平台（安装器按文件名在里面找，不关心顺序）。
