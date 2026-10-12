@@ -197,6 +197,15 @@ jobs:
           if (-not ($names -like '*resources/app.asar')) { Write-Error "包里没有 resources/app.asar"; exit 1 }
 
       - name: 上传附件（并把摘要并进 SHA256SUMS.txt）
+        # ⚠️ cwd 必须是 `windows`。
+        # make-sums.js 内部用 `path.resolve(__dirname, '..', 'dist')` 定位产物，
+        # 也就是说**它写到哪里由自己在哪决定，与 cwd 无关**；而本步骤后面所有
+        # `dist/...`、`SHA256SUMS.txt` 都是**相对 cwd** 的。
+        # 两者不一致就会打架：cwd 在仓库根时，脚本把摘要写进 windows/dist/，
+        # 步骤却去读根目录的 dist/SHA256SUMS.txt → 找不到 → 整步以 1 退出。
+        # 实测就是这一行让 Windows 资产迟迟发不出来。把 cwd 设成 windows，
+        # 两边落到同一个 dist/，问题消失。
+        working-directory: windows
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISPATCH_TAG: ${{ inputs.tag }}
