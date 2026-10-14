@@ -283,6 +283,23 @@ check('releases/latest 用 followRedirects:false 读 302',
 //    写成 fsp.promises.cp 会取到 undefined。
 check('解压落位用 fs/promises 的 cp（不是 fsp.promises.cp）',
   /await fsp\.cp\(/.test(srv) && !/fsp\.promises\.cp\(/.test(srv));
+
+// ── 大文件下载的鲁棒性（2026-10-14 真机实测踩出来的）──
+//
+// 153MB 的安装包在限速直连上爬了 42 分钟后连接僵死：对外 443 全没了，
+// 下载的 promise 却永不 settle —— `req.setTimeout` 只管「socket 完全
+// 无数据」的窗口，拦不住半死连接；全量缓冲还把宿主堆顶到 +150MB。
+// 岛永远不出现、也永远不报错，比直接失败更糟。四条纪律：
+check('大文件流式落盘（不整包进内存）',
+  /sink = null/.test(srv) && /createWriteStream\(destPath\)/.test(srv) && /sha256File/.test(srv));
+check('下载有停滞看门狗与总时限（半死连接必须被掐断）',
+  /stallMs/.test(srv) && /budgetMs/.test(srv) && /下载停滞/.test(srv) && /总时限/.test(srv));
+check('安装包逐源回退（直连放弃换镜像，摘要源与 zip 源解耦）',
+  /downloadAssetWithFallback/.test(srv) && (srv.match(/downloadAssetWithFallback\(/g) || []).length >= 3,
+  '出现次数 = ' + (srv.match(/downloadAssetWithFallback\(/g) || []).length);
+check('302 跳转不丢自定义参数（大下载跳 CDN 时刹车必须还在）',
+  /sink, stallMs, budgetMs,/.test(srv));
+check('每个源下完独立核 SHA256', /SHA256 不符/.test(srv));
 check('诊断日志用顶层静态 import 的 fs/path',
   /import fsSync from 'node:fs'/.test(srv) && /import pathSync from 'node:path'/.test(srv));
 check('settings 服务缺失时也有告警', /settings 服务不可用/.test(srv));

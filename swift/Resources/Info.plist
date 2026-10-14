@@ -11,7 +11,7 @@
        （`DSHNotch-$VER-arm64.zip`）。留在 0.3.0 的后果是：tag 打的是 v1.2.0，
        CI 却上传 `DSHNotch-0.3.0-arm64.zip`，插件按 `DSHNotch-1.2.0-*.zip`
        去找，永远找不到 —— 已实测踩过一次。 -->
-  <key>CFBundleShortVersionString</key><string>1.2.0</string>
+  <key>CFBundleShortVersionString</key><string>1.3.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
