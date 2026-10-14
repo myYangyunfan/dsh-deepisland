@@ -219,6 +219,61 @@ console.log('\n=== S9: 桥的 pending 必须一路透传到界面 ===');
     /\.pending\s*\{[^}]*color:\s*#FFAA00/.test(styles));
 }
 
+console.log('\n=== S10: 动效契约（形变/驻留/等待展开/门控） ===');
+// 这套东西横跨三个文件 + CSS，失配的症状全是「看起来不对」而非报错：
+//   - 高度动画没有 ResizeObserver 跟随 → 内容动了、窗口不动，半途被裁；
+//   - 折叠时立即 setExpanded(false) → 主进程把窗口一把设回折叠尺寸，
+//     缩矮弹簧播到一半被拦腰截断；
+//   - 错峰入场不设 data-fresh 门 → 快照每拍重建 innerHTML，行每拍重播，
+//     列表看起来一直在抖；
+//   - 悬停没有驻留门槛 → 鼠标划过屏幕顶端去点最大化，岛一路误触展开。
+// 逐条钉住，改任何一处都得三处一起想。
+{
+  const html = read('index.html');
+
+  check('index.html 有 .body 内容筒（高度动画的载体）',
+    /class="body"/.test(html) && /id="content"/.test(html));
+  check('.body 必须 overflow:hidden（缩矮半途底部内容本来就该被裁）',
+    /\.body\s*\{[\s\S]{0,200}?overflow:\s*hidden/.test(styles));
+  check('.body 的 height 走同一条弹簧（与 width/neck 一致才读作「一起张开」）',
+    /\.body\s*\{[\s\S]{0,260}?transition:\s*height var\(--spring-ms\) var\(--spring\)/.test(styles));
+  check('.island 的 width 参与形变（折叠窄、展开宽）',
+    /\.island\s*\{[\s\S]{0,500}?transition:\s*width var\(--spring-ms\) var\(--spring\)/.test(styles));
+  check('宽度只差一档（差大了就从「岛」变成「弹窗」）',
+    /--w-collapsed:\s*380px/.test(styles) && /--w-expanded:\s*412px/.test(styles));
+
+  check('渲染层用 ResizeObserver 把逐帧尺寸回传主进程',
+    /new ResizeObserver\(\(\) => requestResize\(\)\)\.observe/.test(renderer));
+  check('尺寸回传量实测宽（写死 380 会在宽度动画半途裁右侧）',
+    /const w = island\.offsetWidth;/.test(renderer));
+  check('折叠方向等动画播完再报主进程（否则弹簧被一把截断）',
+    /COLLAPSE_SETTLE_MS/.test(renderer) && /setExpanded\(false\)/.test(renderer));
+  check('悬停有驻留门槛（开慢关快，与 macOS 版同一手感）',
+    /HOVER_OPEN_MS = 180/.test(renderer) && /HOVER_CLOSE_MS = 120/.test(renderer));
+  check('「等待确认」自动展开（与 macOS 版同一条纪律）',
+    /entries\[0\]\.status === 'waiting'/.test(renderer));
+
+  check('错峰入场有 data-fresh 门（防每拍重播）',
+    /dataset\.fresh = '1'/.test(renderer) && /\[data-fresh="1"\] \.row/.test(styles));
+  check('行带 --i 序号与 --dot 状态色',
+    /--i:' \+ \(i \|\| 0\)/.test(renderer) && /--dot:' \+ esc\(e\.glow/.test(renderer));
+  check('主行状态点带状态类（waiting 加急呼吸靠它）',
+    /st-' \+ esc\(e\.status\)/.test(renderer) && /\.st-waiting/.test(styles));
+
+  check('装饰动效受 glowEffect 门控（关掉只剩信息，不剩光）',
+    /dataset\.glow = glowOn \? '1' : '0'/.test(renderer)
+      && /\[data-glow="1"\]/.test(styles));
+  check('底部活动线与待确认呼吸都在（sheen / attention）',
+    /@keyframes sheen/.test(styles) && /@keyframes attention/.test(styles));
+  check('声呐环 keyframes 在（dot-ping）',
+    /@keyframes dot-ping/.test(styles));
+  check('prefers-reduced-motion 全量让位（无障碍）',
+    /@media \(prefers-reduced-motion: reduce\)/.test(styles));
+
+  check('冒烟模式落两张截图（跑通≠长得对，图才算数）',
+    /capturePage\(\)/.test(main) && /smoke-collapsed\.png/.test(main) && /smoke-expanded\.png/.test(main));
+}
+
 console.log('\n' + '='.repeat(44));
 console.log('通过 ' + pass + ' / 失败 ' + fail);
 console.log('='.repeat(44));

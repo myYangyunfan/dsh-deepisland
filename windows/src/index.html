@@ -26,11 +26,18 @@
   -->
   <div id="island" class="island">
     <div class="neck" aria-hidden="true"></div>
-    <div id="pinned-hint" class="pinned-hint"></div>
-    <div id="primary" class="primary"></div>
-    <div id="list" class="list"></div>
-    <div id="stats" class="stats"></div>
-    <div id="footer" class="footer"></div>
+    <!-- .body 是高度动画的载体（见 styles.css）：换内容前后各量一次高，
+         两个显式值写在它身上让 CSS 弹簧过渡，ResizeObserver 再把逐帧
+         尺寸回传主进程 —— 透明窗口于是贴着动画走，不会出现「内容动了、
+         窗口还停在旧尺寸」的半途裁切。.neck 必须留在 .body 之外：
+         它靠负 margin 探在 .island 的 box 之外，进筒就被 overflow 裁掉。 -->
+    <div id="content" class="body">
+      <div id="pinned-hint" class="pinned-hint"></div>
+      <div id="primary" class="primary"></div>
+      <div id="list" class="list"></div>
+      <div id="stats" class="stats"></div>
+      <div id="footer" class="footer"></div>
+    </div>
   </div>
   <script src="renderer.js"></script>
 </body>

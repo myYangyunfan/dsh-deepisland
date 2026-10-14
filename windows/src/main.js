@@ -433,21 +433,57 @@ function startLoop() {
   // 存在的理由：UI 层（renderer.js / styles.css）在纯 Node 自检里测不到，
   // 而「没跑过的 UI 代码」等于没写。这个开关让 CI 能真的把岛显示出来、
   // 读回渲染后的文本与窗口尺寸，再自己退出。
+  //
+  // 除了读文本，还会**落两张截图**（折叠态 + 展开态）：动画/布局这类
+  // 「跑通了但长得不对」的问题只有看图能发现。截图目录由
+  // DSH_NOTCH_SMOKE_DIR 指定（默认与冒烟输出同目录，再退 %APPDATA%\DSHNotch）。
+  // 展开态用合成 mouseenter 触发 —— 渲染层有悬停驻留门槛，直接 dispatch
+  // 事件即可跨过定时器（listener 不校验 isTrusted）。
   if (process.env.DSH_NOTCH_SMOKE === '1') {
     forceShow = true;
     setTimeout(async () => {
       if (!win || win.isDestroyed()) { app.quit(); return; }
       win.show();
       await new Promise((r) => setTimeout(r, 1500));
-      try {
+      const lines = [];
+      const shotDir = process.env.DSH_NOTCH_SMOKE_DIR
+        || (process.env.DSH_NOTCH_SMOKE_OUT
+          ? path.dirname(process.env.DSH_NOTCH_SMOKE_OUT)
+          : path.join(process.env.APPDATA || '.', 'DSHNotch'));
+      const shot = async (name) => {
+        try {
+          const img = await win.webContents.capturePage();
+          fs.mkdirSync(shotDir, { recursive: true });
+          const file = path.join(shotDir, name);
+          fs.writeFileSync(file, img.toPNG());
+          lines.push('截图 = ' + file);
+        } catch (e) {
+          lines.push('截图失败（' + name + '）: ' + (e && e.message));
+        }
+      };
+      const readIsland = async () => {
         const text = await win.webContents.executeJavaScript(
           'document.getElementById("island").innerText');
         const size = win.getSize();
-        const lines = [
-          '渲染文本 = ' + JSON.stringify(text),
-          '窗口尺寸 = ' + size.join('x'),
-          '会话数 = ' + (JSON.parse(lastSnapshotJson).entries || []).length,
-        ];
+        return { text, size };
+      };
+      try {
+        // 折叠态：文本 + 尺寸 + 截图
+        const c = await readIsland();
+        lines.push('折叠文本 = ' + JSON.stringify(c.text));
+        lines.push('折叠尺寸 = ' + c.size.join('x'));
+        await shot('smoke-collapsed.png');
+
+        // 展开态：合成悬停 → 等形变弹簧走完 → 再量再截
+        await win.webContents.executeJavaScript(
+          'document.dispatchEvent(new MouseEvent("mouseenter"))');
+        await new Promise((r) => setTimeout(r, 900));
+        const e = await readIsland();
+        lines.push('展开文本 = ' + JSON.stringify(e.text));
+        lines.push('展开尺寸 = ' + e.size.join('x'));
+        await shot('smoke-expanded.png');
+        lines.push('会话数 = ' + (JSON.parse(lastSnapshotJson).entries || []).length);
+
         for (const l of lines) console.log('[smoke] ' + l);
         // 打包后的 exe 是 Windows GUI 子系统进程，stdout 拿不到（终端里一片空白），
         // 所以额外写一份到文件 —— 否则「打包产物真的能跑」这件事无从验证。
