@@ -93,7 +93,9 @@ function detectProfile() {
   const out = hostCommandLines();
   if (out) {
     const esc = path.join(PROFILES).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    for (const line of out.split('\r?\n')) {
+    // /\r?\n/ 而不是 '\r?\n'：后者是字符串字面量（CR '?' LF），永远切不开，
+    // 全靠「整个输出当一行、正则全局搜」侥幸工作 —— 换成正则后逐行精确匹配。
+    for (const line of out.split(/\r?\n/)) {
       if (!line.includes('dsh-desktop-host')) continue;
       const m = line.match(new RegExp(esc + '[\\\\/]([^\\\\/\\s]+)'));
       if (m) return m[1];

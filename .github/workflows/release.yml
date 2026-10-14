@@ -216,19 +216,17 @@ jobs:
           # 插件的 parseSums 只认 shasum 那一种形状。
           node scripts/make-sums.js
 
-          # ⚠️ 不能写 `gh release download ... 2>$null`。
-          # Windows runner 的默认 shell 是 **PowerShell 7**（日志里可见
-          # `shell: C:\Program Files\PowerShell\7\pwsh.EXE`），而 PS7 会把
-          # native 命令写往 stderr 的内容当 ErrorRecord 抛出来 ——
-          # `2>$null` 只重定向了流、没拦住 ErrorRecord，于是**即使命令成功**，
-          # 这一步也可能以非零码收场（实测：就是它让上传步骤无故变红）。
-          # 改成：用 -o 把 stderr 收成字符串，失败也不打断，并把原因打出来。
-          $dlErr = (gh release download "$TAG" -p SHA256SUMS.txt --clobber -o _dl_err.txt 2>&1 | Out-String)
-          if (Test-Path _dl_err.txt) {
-            $t = Get-Content _dl_err.txt -Raw -ErrorAction SilentlyContinue
-            if ($t) { Write-Host "下载远端摘要的输出（非致命）: $t" }
-            Remove-Item _dl_err.txt -Force -ErrorAction SilentlyContinue
-          }
+          # ⚠️ gh release download 必须原样落到 ./SHA256SUMS.txt。
+          #
+          # 这里曾写 `-o _dl_err.txt`，把 `-o` 当成 stderr 重定向 —— 错了：
+          # gh CLI 的 `-o/--output` 是「下载结果写到哪个文件」。后果是远端摘要
+          # 被存成 _dl_err.txt、当错误日志打印后删掉，合并永远不发生，
+          # release 里只剩 win 行 → mac 插件报「校验文件里没有 arm64 资产」
+          # （v1.2.0 实际发生过，靠末尾的 verify-release 闸门兜住回归）。
+          # stderr 的收集交给 cmd 的 2>nul：pwsh 会把 native stderr 包成
+          # ErrorRecord（PS7 + $ErrorActionPreference=stop 时能弄红整步），
+          # 借道 cmd 就没有这层语义。
+          cmd /c "gh release download $TAG -p SHA256SUMS.txt --clobber 2>nul"
           if (Test-Path SHA256SUMS.txt) {
             # mac 那条先建好了 release：把它的行放前面，win 的接在后面，
             # 一份文件覆盖两个平台（安装器按文件名在里面找，不关心顺序）。
@@ -242,6 +240,56 @@ jobs:
           $assets = @(Get-ChildItem dist/*.zip, dist/*.exe |
             Where-Object { $_.Name -notlike '*__uninstaller*' } |
             ForEach-Object { $_.FullName }) + @((Resolve-Path dist/SHA256SUMS.txt).Path)
-          gh release upload "$TAG" $assets --clobber
+          # 与 mac 那条同一条纪律：谁先跑谁建 release，另一个 upload 追加。
+          # 只写 upload 的话，win 先到而 release 还没建（mac 在编译）时
+          # 这一步会红 ——「Windows 资产发不出去」的老症状换个姿势复发。
+          # （标题里去 v 前缀用 $() 子表达式：bash 的 ${TAG#v} 在 pwsh 里
+          #  会被当成名为 "TAG#v" 的变量，悄悄展开成空串。）
+          gh release create "$TAG" --title "DSH Notch $($TAG.TrimStart('v'))" --generate-notes $assets ||
+            gh release upload "$TAG" $assets --clobber
           Write-Host "--- 发布结果 ---"
           gh release view "$TAG"
+
+  verify-release:
+    name: 闸门：双平台摘要必须齐全且正确
+    # 两条构建 job 各自「下载-合并-上传」是尽力而为（中间还有谁先建
+    # release 的竞态），任何一环掉线都可能发布出「摘要缺某个平台」的
+    # release —— 插件按名字找不到摘要就拒绝安装，用户看到的是
+    # 「两个源都取不到 SHA256SUMS.txt」。这条 job 在两者都完成后
+    # 把最终产物当黑盒重新校验：缺行/哈希不符直接红，绝不静默放行。
+    needs: [release-macos, release-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验 SHA256SUMS 覆盖双平台且与资产一致
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          TAG="${DISPATCH_TAG:-${GITHUB_REF_NAME}}"
+          VER="${TAG#v}"
+          REPO=myYangyunfan/dsh-deepisland
+          echo "校验 tag: $TAG"
+          rm -rf verify && mkdir verify && cd verify
+          # 本 job 不 checkout，gh 必须显式知道仓库
+          gh release download "$TAG" -R "$REPO" --clobber
+          ls -la
+          # 1) 必需资产一个都不能少
+          for a in "DSHNotch-${VER}-arm64.zip" "DSHNotch-${VER}-win-x64.zip"; do
+            if [ ! -f "$a" ]; then
+              echo "❌ 缺资产 $a —— 对应平台的自动安装会直接失败"
+              exit 1
+            fi
+          done
+          # 2) 摘要文件必须存在，且两个平台的 zip 都有行
+          if [ ! -f SHA256SUMS.txt ]; then
+            echo "❌ release 里没有 SHA256SUMS.txt"
+            exit 1
+          fi
+          for a in "DSHNotch-${VER}-arm64.zip" "DSHNotch-${VER}-win-x64.zip"; do
+            if ! grep -F "  $a" SHA256SUMS.txt; then
+              echo "❌ SHA256SUMS.txt 缺 $a 的行 —— 插件 parseSums 按文件名找，找不到就中止安装"
+              exit 1
+            fi
+          done
+          # 3) 每一行都得和真实资产对得上（下载全部资产就地核哈希）
+          sha256sum -c SHA256SUMS.txt

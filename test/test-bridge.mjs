@@ -240,21 +240,54 @@ if (bridge) {
 }
 
 // ===========================================================================
-console.log('\n=== T5: 端口被占时顺延 ===');
+console.log('\n=== T5: 端口占用与「一机一桥」 ===');
 // ===========================================================================
 {
+  // T5a: 陌生服务占住起始端口 → 仍然顺延（这条老语义只该对「不是自己人」生效）
   const p2 = await freePort();
-  const first = await startBridge({ port: p2, log: () => {} });
-  check('第二个实例也起来了', !!first);
-  if (first) {
-    check('第一个占住起始端口', first.port === p2, first.port + ' vs ' + p2);
-    const second = await startBridge({ port: p2, log: () => {} });
-    check('同端口的第二个实例顺延而非失败', !!second && second.port === p2 + 1, second && String(second.port));
-    const hh = await getJson(p2, '/health');
-    check('两个实例互不串号', hh.body.port === p2, String(hh.body.port));
-    if (second) await second.close();
-    await first.close();
+  const squatter = net.createServer(() => { /* 只 accept 不应答 */ });
+  await new Promise((r) => squatter.listen(p2, '127.0.0.1', r));
+  const shifted = await startBridge({ port: p2, log: () => {} });
+  check('陌生占用者仍触发端口顺延', !!shifted && shifted.port === p2 + 1,
+    shifted && String(shifted.port));
+  if (shifted) await shifted.close();
+  squatter.close();
+
+  // T5b: 同进程同端口重复调用 → 幂等返回同一座桥。
+  // 曾经这里断言「顺延而非失败」—— 那正是多桥分裂的源头：宿主把 apply()
+  // 跑多遍时每次都真起一座桥，app（读 bridge.json，最后写入者）与客户端
+  // （按序探测锁定第一座）各认一座，点击投进没人消费的队列。
+  const p3 = await freePort();
+  const first = await startBridge({ port: p3, log: () => {} });
+  check('第一座占住起始端口', !!first && first.port === p3, first && String(first.port));
+  const second = await startBridge({ port: p3, log: () => {} });
+  check('同端口重复调用返回同一座桥（幂等，不再占第二个端口）',
+    second === first, second && ('port=' + second.port + ' reused=' + !!second.reused));
+  if (first) await first.close();
+
+  // T5c: 跨进程的兄弟桥（同插件、健康）→ 复用而非再起一座。
+  // 用子进程跑 serve-bridge 模拟「另一个运行时里的本插件」。
+  const { spawn } = await import('node:child_process');
+  const p4 = await freePort();
+  const child = spawn(process.execPath,
+    [path.join(ROOT, 'test', 'serve-bridge.mjs'), String(p4)],
+    { stdio: 'ignore', windowsHide: true });
+  let siblingUp = false;
+  for (let i = 0; i < 40 && !siblingUp; i += 1) {
+    await new Promise((r) => setTimeout(r, 150));
+    try { const h = await getJson(p4, '/health'); siblingUp = !!(h.body && h.body.ok); } catch { /* 还没起 */ }
   }
+  check('子进程的兄弟桥已就绪', siblingUp, 'p4=' + p4);
+  if (siblingUp) {
+    const mine = await startBridge({ port: p4, log: () => {} });
+    check('探测到健康兄弟桥 → 复用（reused 标记）',
+      !!mine && mine.reused === true && mine.port === p4,
+      mine && ('port=' + mine.port + ' reused=' + !!mine.reused));
+    if (mine) await mine.close();   // 复用者不拥有桥：close 不能把兄弟关掉
+    const h2 = await getJson(p4, '/health');
+    check('复用者 close 不误伤兄弟桥', !!(h2.body && h2.body.ok), String(h2.status));
+  }
+  child.kill();
 }
 
 // ===========================================================================

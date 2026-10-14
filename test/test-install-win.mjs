@@ -150,17 +150,32 @@ console.log('\n=== W5: 架构守卫 ===');
 
 console.log('\n=== W6: 预演只回答「会装到哪」，不落任何文件 ===');
 {
-  const target = path.join(BASE, 'dry-run-target');   // 故意不存在
-  const calls = [];
-  const r = await mod.ensureAppInstalled({
-    installDir: target, platform: 'win32', nodeArch: 'x64', version: '1.1.0',
-    dryRun: true, log: () => {}, spawnImpl: spySpawn(calls),
-  });
-  check('报 dry-run', r.status === 'dry-run', JSON.stringify(r));
-  check('资产名 = DSHNotch-<ver>-win-<arch>.zip',
-    /DSHNotch-1\.1\.0-win-x64\.zip/.test(r.detail || ''), r.detail);
-  check('预演不建目录', fs.existsSync(target) === false, target + ' 被建出来了');
-  check('预演不启动任何进程', calls.length === 0, JSON.stringify(calls));
+  // 把默认安装位置指到沙箱：ensureWindowsAppInstalled 会把
+  // %LOCALAPPDATA%\Programs\DSHNotch 也列为候选，任何真装过 DSHNotch 的
+  // 机器（开发机、跑过自动安装的用户机）都会抢先命中 present 分支，
+  // 把「预演」变成「已装」—— 这条测试就此假红。预演必须在自己控制的
+  // 环境里验，不能依赖「这台机器恰好没装」。
+  const realLocalAppData = process.env.LOCALAPPDATA;
+  const sandboxLocalAppData = path.join(BASE, 'no-default-install');
+  process.env.LOCALAPPDATA = sandboxLocalAppData;
+  try {
+    const target = path.join(BASE, 'dry-run-target');   // 故意不存在
+    const calls = [];
+    const r = await mod.ensureAppInstalled({
+      installDir: target, platform: 'win32', nodeArch: 'x64', version: '1.1.0',
+      dryRun: true, log: () => {}, spawnImpl: spySpawn(calls),
+    });
+    check('报 dry-run', r.status === 'dry-run', JSON.stringify(r));
+    check('资产名 = DSHNotch-<ver>-win-<arch>.zip',
+      /DSHNotch-1\.1\.0-win-x64\.zip/.test(r.detail || ''), r.detail);
+    check('预演不建目录', fs.existsSync(target) === false, target + ' 被建出来了');
+    check('预演不启动任何进程', calls.length === 0, JSON.stringify(calls));
+    check('默认位置也没被碰（沙箱未落地）',
+      fs.existsSync(sandboxLocalAppData) === false, sandboxLocalAppData + ' 被建出来了');
+  } finally {
+    if (realLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = realLocalAppData;
+  }
 }
 
 console.log('\n=== W7: 包结构定位（zip 里有一层平台目录）===');

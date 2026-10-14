@@ -286,7 +286,11 @@ Windows 上没有 NSPanel 的等价物。手写原生要处理 `WS_EX_LAYERED` /
   是否注册过**尚未实测**，且 Windows 没有 CGEvent 那种按键注入能力
 - **状态判定**靠投影侧信号 + 「文件刚被写过」这个启发式 —— 真实事件流里
   `type` 只有 `session` 一种，没有 `tool/call` 之类（174 份真实投影实测）
-- **自动安装的下载环节**有 29 项断言但没真跑过（release 里还没有 win 附件）
+- ~~自动安装的下载环节没真跑过~~ **已闭环**：v1.2.0 起 Release 带齐双平台资产，
+  下载链路在真机上用 `scripts/verify-install-chain.mjs` 走通过
+  （解析 latest → 取 SHA256SUMS → 下 zip → 核哈希，四步全过）。
+  CI 侧另有 `verify-release` 闸门 job：每次发布后重新下载全部资产核摘要，
+  缺任何一个平台的行都会把发布打红
 
 > **测试套件本身也有平台坑，已修**：判平台相关的断言以前要么写死 macOS 路径
 > （`/usr/bin/ps`、`/usr/bin/curl`、`/usr/bin/ditto`、`/usr/bin/file`），
@@ -640,7 +644,7 @@ deepisland/
 ### 测试
 
 ```bash
-node test/run.mjs all         # 313 项 Node 断言：注册链路、容错、事件扫描、子代理、跳转桥两端、配置持久化
+node test/run.mjs all         # 325 项 Node 断言：注册链路、容错、事件扫描、子代理、跳转桥两端、配置持久化
 node test/run.mjs installdl    # 15 项：T1–T4 离线（15 项），T5 要联网真下载 Release 验 SHA256（约 30s，不进 all）
 node test/run.mjs cfg        # 配置读写的离线语义（默认值 / 坏文件 / 缓存失效 / 白名单）
 ```
@@ -649,10 +653,11 @@ node test/run.mjs cfg        # 配置读写的离线语义（默认值 / 坏文�
 
 | 套件 | 断言 | 覆盖 |
 | :--- | ---: | :--- |
-| `contract` | 36 | 宿主契约（配置命名空间、inject 纪律等） |
-| `parse` / `apply` / `subagent` | 101 | 事件流解析、挂载、子代理聚合 |
+| `contract` | 57 | 宿主契约（配置命名空间、inject 纪律等） |
+| `parse` / `apply` / `subagent` / `mount` | 124 | 事件流解析、挂载、子代理聚合 |
 | `bridge` | 60 | **服务端桥**：起停、CORS、队列语义、TTL、端口顺延、app 完整性判定 |
-| `bridgeclient` | 27 | **客户端桥**：端到端 `POST /jump → 轮询 → openSession`、降级、停用纪律 |
+| `bridgeclient` | 32 | **客户端桥**：端到端 `POST /jump → 轮询 → openSession`、降级、停用纪律 |
+| `installwin` | 39 | **Windows 自动安装决策**：判据、启动纪律、残包不覆盖、架构守卫、预演、包结构定位 |
 | `installdl` | 15 | **自动安装**：不覆盖已装、残缺包不替换、平台/架构守卫、真下载 + 校验 + 篡改检测（需联网） |
 
 跨语言那一段（Swift `URLSession` → Node 桥）由 `./swift/.build/DSHNotch --self-test-jump`

@@ -5,6 +5,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -79,6 +80,18 @@ const check = (name, cond, extra = '') => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** 让操作系统分配一个临时端口（Windows 临时区间 49152+，避开 47311..47322）。 */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.once('error', reject);
+    s.listen(0, '127.0.0.1', () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+}
+
 /**
  * 等条件成立，而不是死等固定毫秒数。
  *
@@ -142,25 +155,21 @@ console.log('\n=== T1: resolveWorkspace 的三条取法 ===');
 // ===========================================================================
 console.log('\n=== T2: 端到端 —— POST /jump → 客户端 openSession ===');
 // ===========================================================================
-// ⚠️ 端口必须是**动态**的，不能用 BRIDGE_PORT_BASE。
-// 真实 DSH 开着时它自己就在 47311 上起桥（正常现象，不是故障），
-// 测试若也往 47311 塞就会：
-//   1) 测试的桥顺延到 47313，而客户端从 47311 顺延探测 → 连到了**真 DSH 的桥**
-//   2) 于是请求投到了真桥上，测试自己的桥队列永远是空的 → 满屏失败，
-//      还可能干扰你正在用的 DSH（把会话切到一个不存在的 id）。
-// 所以这里用 probeBridge 探一个**当前没被占用**的端口。
+// ⚠️ 端口必须**远离 47311..47322**（默认探测区间），也不能用 BRIDGE_PORT_BASE。
+// 两个原因：
+//   1) 真 DSH 开着时它自己就在 47311 上起桥（正常现象，不是故障），
+//      测试若也往 47311 塞就会顺延、客户端连到**真 DSH 的桥**上。
+//   2) 更隐蔽：本进程里 harness 会因前面套件的 apply() 泄出若干**仍在
+//      轮询的僵尸客户端**（它们从 47311 顺延探测、永不停止）。桥一旦落在
+//      这个区间，队列会被它们抢走 —— 投递被无 uiWorkspace 的僵尸消费，
+//      满屏假红（曾表现为 bridgeclient 偶发 27/5，时好时坏）。
+// 解法：用操作系统分配的临时端口（Windows 临时区间 49152+，天然两边都避开）。
 {
-  // 找一个空闲端口：从 47311 起顺延，取第一个「探不到任何桥」的位置
-  let port = null;
-  for (let p = 47311; p < 47311 + 12 && port === null; p++) {
-    try {
-      const r = await req(p, '/health', { timeoutMs: 700 });
-      if (r.status === 0) port = p;          // 连不上 → 空闲
-    } catch { port = p; }
-  }
-  check('找到一个没被占用的桥端口', port !== null, '47311..47322 都被占了');
+  const port = await freePort();
+  check('拿到一个临时端口（远离默认探测区间）',
+    port > 47322 && port !== 47900, String(port));
 
-  const bridge = port === null ? null : await server.startBridge({ port, log: () => {} });
+  const bridge = port > 0 ? await server.startBridge({ port, log: () => {} }) : null;
   check('服务端桥已起', !!bridge);
   if (!bridge) { console.log('  ⚠️  无可用端口，后续用例跳过'); }
 
