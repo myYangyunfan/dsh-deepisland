@@ -282,7 +282,7 @@ check('releases/latest 用 followRedirects:false 读 302',
 // ② `fsp` 导的是 node:fs/promises，cp 直接挂模块上；
 //    写成 fsp.promises.cp 会取到 undefined。
 check('解压落位用 fs/promises 的 cp（不是 fsp.promises.cp）',
-  /await fsp\.cp\(/.test(srv) && !/fsp\.promises\.cp\(/.test(srv));
+  /fsp\.cp\(/.test(srv) && !/fsp\.promises\.cp\(/.test(srv));
 
 // ── 大文件下载的鲁棒性（2026-10-14 真机实测踩出来的）──
 //
@@ -302,6 +302,11 @@ check('302 跳转不丢自定义参数（大下载跳 CDN 时刹车必须还在�
 check('每个源下完独立核 SHA256', /SHA256 不符/.test(srv));
 check('两轮择速：速率底线让慢源早让位，兜底轮不限速（慢的也要）',
   /minBps/.test(srv) && /择速/.test(srv) && /兜底轮/.test(srv) && /低于底线/.test(srv));
+check('拷贝/清理关闭 Electron asar 拦截（.asar 目标路径会被当压缩包解析，只在 Electron 宿主里复现）',
+  /withNoAsar/.test(srv) && /process\.noAsar = true/.test(srv)
+  && /withNoAsar\(\(\) =>\s*\n?\s*fsp\.cp/.test(srv));
+check('staged 落位：拷暂存→验完整→原子换入（目标永不半写）',
+  /placeWindowsStaged/.test(srv) && /renameSync\(staged, target\)/.test(srv));
 check('诊断日志用顶层静态 import 的 fs/path',
   /import fsSync from 'node:fs'/.test(srv) && /import pathSync from 'node:path'/.test(srv));
 check('settings 服务缺失时也有告警', /settings 服务不可用/.test(srv));
