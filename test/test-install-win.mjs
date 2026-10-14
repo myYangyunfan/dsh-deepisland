@@ -119,18 +119,44 @@ console.log('\n=== W3: 启动失败不能把插件带崩 ===');
   check('失败进了日志（这是「下载并运行外部程序」，必须可追溯）', logged.length > 0, JSON.stringify(logged));
 }
 
-console.log('\n=== W4: 残包不自动覆盖 ===');
+console.log('\n=== W4: 残包自愈与占用让路（staged 落位） ===');
+// 2026-10-15 真机事故:直接 cp 到目标被杀软锁打断 → 半写残包(exe 在、
+// asar 缺) → 老守卫「残包不自动覆盖」把自伤半成品当用户的东西拒修复,
+// 岛从此起不来。新纪律:staged 拷贝+验完整+rename 换入;残包被挪走
+// 自愈;真被占用(运行中)才让路。这里直接测落位函数(走完整安装要联网)。
 {
-  const calls = [];
-  const mtimeBefore = fs.statSync(path.join(PARTIAL, 'DSHNotch.exe')).mtimeMs;
-  const r = await mod.ensureAppInstalled({
-    installDir: PARTIAL, platform: 'win32', log: () => {}, spawnImpl: spySpawn(calls),
-  });
-  check('残包报 broken', r.status === 'broken', JSON.stringify(r));
-  check('残包一个字节都不动（覆盖别人的 app 不可接受）',
-    fs.statSync(path.join(PARTIAL, 'DSHNotch.exe')).mtimeMs === mtimeBefore, '被改了');
-  check('残包也不启动', calls.length === 0, JSON.stringify(calls));
-  check('detail 写清缺什么', /exe=true/.test(r.detail || '') || /app\.asar=false/.test(r.detail || ''), r.detail);
+  const fsp = await import('node:fs/promises');
+  const mkFull = (root) => {
+    fs.mkdirSync(path.join(root, 'resources'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'DSHNotch.exe'), 'new-exe');
+    fs.writeFileSync(path.join(root, 'resources', 'app.asar'), 'new-asar');
+  };
+
+  // 4a: 残包目标 → 自愈
+  const tgt = path.join(BASE, 'repair-target');
+  fs.mkdirSync(path.join(tgt, 'resources'), { recursive: true });
+  fs.writeFileSync(path.join(tgt, 'DSHNotch.exe'), 'broken-exe');   // 残包:有 exe 无 asar
+  const srcTree = path.join(BASE, 'full-src');
+  mkFull(srcTree);
+  const r = await mod.placeWindowsStaged({ srcTree, target: tgt, F: fs, P: path, fsp, log: () => {} });
+  check('残包被修复（staged 换入成功）', r.ok === true, JSON.stringify(r));
+  check('修复后目标完整', mod.windowsInstallState(tgt, fs, path).ok === true);
+  check('内容确实是新的', fs.readFileSync(path.join(tgt, 'DSHNotch.exe'), 'utf8') === 'new-exe');
+  check('暂存目录已消失', !fs.existsSync(path.join(BASE, '.DSHNotch-staged-' + process.pid)));
+  const leftovers = fs.readdirSync(BASE).filter((n) => n.startsWith('.DSHNotch-'));
+  check('旧残件已清走（无 .DSHNotch-old-* 残留）', leftovers.length === 0, JSON.stringify(leftovers));
+
+  // 4b: 目标被占用(运行中) → 让路不硬来。Windows 上父目录里有打开句柄的
+  // 文件时 rename 目录会失败 —— 用一个独占句柄模拟「正在运行」。
+  const tgt2 = path.join(BASE, 'locked-target');
+  fs.mkdirSync(path.join(tgt2, 'resources'), { recursive: true });
+  fs.writeFileSync(path.join(tgt2, 'DSHNotch.exe'), 'running-exe');
+  const fd = fs.openSync(path.join(tgt2, 'DSHNotch.exe'), 'r+');
+  const r2 = await mod.placeWindowsStaged({ srcTree, target: tgt2, F: fs, P: path, fsp, log: () => {} });
+  check('被占用时让路（occupied 标记）', r2.ok === false && r2.occupied === true, JSON.stringify(r2));
+  check('占用时目标原样（一个字节不动）',
+    fs.readFileSync(path.join(tgt2, 'DSHNotch.exe'), 'utf8') === 'running-exe');
+  fs.closeSync(fd);
 }
 
 console.log('\n=== W5: 架构守卫 ===');
