@@ -298,8 +298,10 @@ check('安装包逐源回退（直连放弃换镜像，摘要源与 zip 源解�
   /downloadAssetWithFallback/.test(srv) && (srv.match(/downloadAssetWithFallback\(/g) || []).length >= 3,
   '出现次数 = ' + (srv.match(/downloadAssetWithFallback\(/g) || []).length);
 check('302 跳转不丢自定义参数（大下载跳 CDN 时刹车必须还在）',
-  /sink, stallMs, budgetMs,/.test(srv));
+  /sink, stallMs, budgetMs, minBps,/.test(srv));
 check('每个源下完独立核 SHA256', /SHA256 不符/.test(srv));
+check('两轮择速：速率底线让慢源早让位，兜底轮不限速（慢的也要）',
+  /minBps/.test(srv) && /择速/.test(srv) && /兜底轮/.test(srv) && /低于底线/.test(srv));
 check('诊断日志用顶层静态 import 的 fs/path',
   /import fsSync from 'node:fs'/.test(srv) && /import pathSync from 'node:path'/.test(srv));
 check('settings 服务缺失时也有告警', /settings 服务不可用/.test(srv));
