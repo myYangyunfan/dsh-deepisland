@@ -101,17 +101,26 @@ jobs:
           TAG="${DISPATCH_TAG:-${GITHUB_REF_NAME}}"
           echo "发布 tag: $TAG"
           # 两条 job 现在**互不依赖**，谁先跑谁建 release。
-          # 若 win 那条先跑完，这里 download 会拿到它已合并好的 SHA256SUMS.txt，
-          # 必须把自己的行并进去再回传，否则会把 win 的摘要整份覆盖掉
-          # —— 插件的 parseSums 是按文件名在里面找，少了就装不了 Windows 包。
+          # 合并纪律：**按文件名、本地行胜出**。远端已有同名行时，它是
+          # 「上一次构建」的陈旧摘要 —— 二进制是刚重建的，旧哈希必然对不上，
+          # 插件 parseSums 取第一个匹配会直接校验失败。不能简单 cat 追加
+          # （实测堆积出 3 组同名不同值的行），也不能让远端旧值盖住新值。
+          # 输出统一 LF：sha256sum -c 不认 CRLF（闸门 job 会红）。
           DIST=.build/dist
-          gh release download "$TAG" -p SHA256SUMS.txt --clobber 2>/dev/null || true
-          if [ -f SHA256SUMS.txt ]; then
-            cat "$DIST/SHA256SUMS.txt" SHA256SUMS.txt | sort -u -k2 > "$DIST/SHA256SUMS-merged.txt"
-            mv "$DIST/SHA256SUMS-merged.txt" "$DIST/SHA256SUMS.txt"
-            echo "--- 合并后 ---"
-            cat "$DIST/SHA256SUMS.txt"
+          SUMS_ARGS=("$DIST/SHA256SUMS.txt")
+          if gh release download "$TAG" -p SHA256SUMS.txt --clobber 2>/dev/null && [ -f SHA256SUMS.txt ]; then
+            SUMS_ARGS=("SHA256SUMS.txt" "${SUMS_ARGS[@]}")
           fi
+          awk '
+            /^[0-9a-fA-F]{64}[ \t]+/ {
+              name = $2; sub(/^\*/, "", name); gsub(/\r$/, "", name)
+              sum[name] = $1; seen[name] = 1
+            }
+            END { for (n in seen) printf "%s  %s\n", sum[n], n }
+          ' "${SUMS_ARGS[@]}" | sort > "$DIST/SHA256SUMS-merged.txt"
+          mv "$DIST/SHA256SUMS-merged.txt" "$DIST/SHA256SUMS.txt"
+          echo "--- 合并后 ---"
+          cat "$DIST/SHA256SUMS.txt"
           gh release create "$TAG" \
             --title "DSH Notch ${TAG#v}" \
             --generate-notes \
@@ -227,13 +236,24 @@ jobs:
           # ErrorRecord（PS7 + $ErrorActionPreference=stop 时能弄红整步），
           # 借道 cmd 就没有这层语义。
           cmd /c "gh release download $TAG -p SHA256SUMS.txt --clobber 2>nul"
-          if (Test-Path SHA256SUMS.txt) {
-            # mac 那条先建好了 release：把它的行放前面，win 的接在后面，
-            # 一份文件覆盖两个平台（安装器按文件名在里面找，不关心顺序）。
-            Get-Content SHA256SUMS.txt, dist/SHA256SUMS.txt |
-              Set-Content dist/SHA256SUMS-merged.txt -Encoding utf8
-            Move-Item dist/SHA256SUMS-merged.txt dist/SHA256SUMS.txt -Force
+          # 合并纪律与 mac 侧一致：**按文件名、本地行胜出**。本地是刚构建的，
+          # 远端同名行是历史构建的陈旧摘要，直接拼接会堆积出多组同名不同值
+          # （实测堆积过 3 组，插件 parseSums 取第一个匹配 → 校验必失败）。
+          # 行尾必须 LF：sha256sum -c 不认 CRLF，而 Set-Content 默认写 CRLF，
+          # 所以用 -NoNewline 手工拼 `n。
+          $byName = @{}
+          foreach ($f in @('SHA256SUMS.txt', 'dist/SHA256SUMS.txt')) {
+            if (Test-Path $f) {
+              foreach ($line in (Get-Content $f)) {
+                if ($line -match '^([0-9a-fA-F]{64})\s+\*?(\S+)') {
+                  $byName[$Matches[2]] = $Matches[1]   # 后读的本地文件覆盖远端同名
+                }
+              }
+            }
           }
+          $merged = ($byName.GetEnumerator() | Sort-Object Key |
+            ForEach-Object { "$($_.Value)  $($_.Key)" }) -join ("`n")
+          Set-Content -NoNewline -Encoding ascii -Value ($merged + "`n") -Path dist/SHA256SUMS.txt
           Write-Host "--- 合并后 ---"
           Get-Content dist/SHA256SUMS.txt
           # __uninstaller.exe 是 NSIS 的中间产物，不是给用户下的，不上传。
@@ -285,11 +305,22 @@ jobs:
             echo "❌ release 里没有 SHA256SUMS.txt"
             exit 1
           fi
+          # 统一行尾再查：CRLF 会让 sha256sum -c 直接报格式错误（真实踩过），
+          # 插件 parseSums 虽然能容忍，但闸门要在「哈希真的对不对」上较真
+          tr -d '\r' < SHA256SUMS.txt > sums.lf && mv sums.lf SHA256SUMS.txt
           for a in "DSHNotch-${VER}-arm64.zip" "DSHNotch-${VER}-win-x64.zip"; do
             if ! grep -F "  $a" SHA256SUMS.txt; then
               echo "❌ SHA256SUMS.txt 缺 $a 的行 —— 插件 parseSums 按文件名找，找不到就中止安装"
               exit 1
             fi
           done
-          # 3) 每一行都得和真实资产对得上（下载全部资产就地核哈希）
+          # 3) 同名不允许出现两组摘要（堆积的陈旧行会让 parseSums 取到错的那个）
+          for a in "DSHNotch-${VER}-arm64.zip" "DSHNotch-${VER}-win-x64.zip" "DSHNotch-${VER}-win-x64.exe"; do
+            n=$(grep -cF "  $a" SHA256SUMS.txt || true)
+            if [ "${n:-0}" -gt 1 ]; then
+              echo "❌ $a 有 $n 行摘要 —— 合并逻辑堆积了陈旧行，parseSums 取第一个匹配会校验失败"
+              exit 1
+            fi
+          done
+          # 4) 每一行都得和真实资产对得上（下载全部资产就地核哈希）
           sha256sum -c SHA256SUMS.txt
