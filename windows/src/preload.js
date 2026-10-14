@@ -22,14 +22,15 @@ contextBridge.exposeInMainWorld('island', {
     return ipcRenderer.invoke('island:jump', payload);
   },
 
-  /** 让主进程把窗口调成这个尺寸（CSS px，未乘 scale）。 */
-  resize(width, height) {
-    return ipcRenderer.invoke('island:resize', { width, height });
-  },
-
-  /** 通知主进程当前是展开还是折叠（影响折叠时的默认尺寸）。 */
-  setExpanded(value) {
-    return ipcRenderer.invoke('island:expand', value);
+  /**
+   * 指针进岛/出岛时切换窗口的点击穿透（macOS 版 isInteractive 的对应物）。
+   *
+   * 窗口按最大展开态开、比岛大一圈，平时必须穿透（否则岛下方的应用
+   * 点不动），只有指针真的在岛上时才临时接管 —— 岛里的行/按钮才点得到。
+   * 判定在渲染层做（转发来的 mousemove × 岛的当前矩形），翻转时才发这条 IPC。
+   */
+  setInteractive(value) {
+    return ipcRenderer.invoke('island:set-interactive', !!value);
   },
 
   hide() { return ipcRenderer.invoke('island:hide'); },

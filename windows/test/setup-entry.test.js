@@ -148,53 +148,50 @@ console.log('\n=== S7: 快照字段必须容缺（否则首帧白屏）===');
     /cfg\.scale \|\| 1/.test(body));
 }
 
-console.log('\n=== S8: 连接器（.neck）与主进程的几何必须对得上 ===');
-// 这套东西横跨三个文件，任何一处单独改都不会报错，只会「看起来有点怪」：
-//   index.html  → 有没有 .neck 节点
-//   styles.css  → .neck 的高度 / 负 margin / pointer-events
-//   main.js     → 窗口高度是否 +NECK、y 是否 -NECK
-// 三者任一失配的后果都不直观（颈部被裁掉、方角露在屏幕里、
-// 或者屏幕最顶端凭空多出一条 10px 的点击带），所以逐条钉住。
+console.log('\n=== S8: 窗口架构契约（固定最大窗口 + 穿透 + 顶端贴屏） ===');
+// macOS 版丝滑的来源是「窗口按最大展开态开好、内容在窗口里动画」。
+// Windows 版照搬这条后，任何一处退回「窗口跟内容跑」的老路都会把
+// 动画重新拖进 DWM 的抖动里，所以逐条钉住：
+//   main.js     窗口尺寸恒为 MAX_WINDOW、y = workArea.y、穿透为常态
+//   index.html  岛顶对齐居中（没有 .neck —— 窗口顶=屏顶，无需连接器）
+//   styles.css  顶平方角（border-radius 0 0 …）、弹簧时长与 Swift 对齐
+//   preload.js  island:set-interactive 与主进程对上（S1 已查通道一致）
 {
   const html = read('index.html');
-  const neckH = 10;
 
-  check('index.html 里有 .neck 节点', /class="neck"/.test(html));
-  check('.neck 是 aria-hidden（纯装饰，不该被读屏念出来）',
-    /class="neck"\s+aria-hidden="true"/.test(html));
+  check('main.js 定义固定窗口尺寸 MAX_WINDOW', /const MAX_WINDOW = \{ w: \d+, h: \d+ \}/.test(main));
+  check('窗口 y 与工作区顶端重合（顶边方角落在屏幕边界上）',
+    /const y = area\.y;/.test(main), '应是 area.y，不留顶部 bleed');
+  check('穿透为常态：创建后 setIgnoreMouseEvents(true, {forward:true})',
+    /setIgnoreMouseEvents\(true, \{ forward: true \}\)/.test(main));
+  check('渲染层可临时接管：island:set-interactive → setIgnoreMouseEvents(!value)',
+    /'island:set-interactive'[\s\S]{0,300}setIgnoreMouseEvents\(!value, \{ forward: true \}\)/.test(main));
+  check('没有旧的逐帧尺寸通道（island:resize 已随架构移除）',
+    !/island:resize/.test(main) && !/island:resize/.test(preload));
+  check('没有旧的展开状态通道（island:expand 已随架构移除）',
+    !/island:expand/.test(main) && !/island:expand/.test(preload));
+
+  check('岛在窗口里顶端居中（body flex + align-items:flex-start）',
+    /html, body\s*\{[\s\S]{0,600}?display: flex/.test(styles)
+      && /align-items: flex-start/.test(styles)
+      && /justify-content: center/.test(styles));
+  check('index.html 已无 .neck（窗口顶=屏顶，连接器失去存在理由）',
+    !/class="neck"/.test(html));
 
   // 形状：顶平 + 底圆角。对齐 swift/UI/NotchShape.swift 的结论。
-  check('岛本体只有底部圆角（顶部交给 .neck 的方角）',
-    /\.island\s*\{[\s\S]{0,400}?border-radius:\s*0 0 14px 14px/.test(styles),
-    (styles.match(/\.island\s*\{[\s\S]{0,400}?border-radius:[^;]*/) || [''])[0].slice(0, 80));
+  check('岛本体只有底部圆角（顶部方角贴屏幕顶边）',
+    /border-radius:\s*0 0 var\(--r-collapsed\)/.test(styles),
+    (styles.match(/border-radius:[^;]*/) || [''])[0]);
 
-  check('.neck 用负 margin 探出岛的 box',
-    /\.neck\s*\{[\s\S]{0,400}?margin-top:\s*calc\(-1 \*/.test(styles));
-  check('.neck 必须 pointer-events:none（否则吃掉屏幕顶端 10px 点击带）',
-    /\.neck\s*\{[\s\S]{0,400}?pointer-events:\s*none/.test(styles));
-
-  // 主进程侧：窗口高度要 +NECK、y 要 -NECK
-  check('main.js 定义了 NECK_OVERHANG', /const NECK_OVERHANG = (\d+)/.test(main),
-    '没找到常量');
-  const m = main.match(/const NECK_OVERHANG = (\d+)/);
-  const declared = m ? Number(m[1]) : -1;
-  check('NECK_OVERHANG 与 CSS 的 .neck 高度一致（不一致会露边）',
-    declared === neckH, 'main=' + declared + ' css=' + neckH);
-  check('窗口高度 = (h + NECK_OVERHANG) * scale',
-    /const hh = Math\.round\(\(h \+ NECK_OVERHANG\) \* scale\)/.test(main));
-  check('窗口 y 向上探出（否则方角露在屏幕里）',
-    /area\.y - NECK_OVERHANG \* scale/.test(main));
-  check('y 不能真把岛推出屏幕（任务栏在上时 workArea.y 为负）',
-    /Math\.max\(area\.y,/.test(main));
-
-  // 渲染层：data-expanded 是 CSS 过渡的驱动源
-  check('render() 写 data-expanded（否则过渡不触发）',
-    /island\.dataset\.expanded = expanded \? '1' : '0'/.test(renderer)
-    || /dataset\.expanded = expanded \? "1" : "0"/.test(renderer));
+  // 渲染层：data-expanded 是 CSS 形变的驱动源
+  check('render() 写 data-expanded（否则形变不触发）',
+    /island\.dataset\.expanded = expanded \? '1' : '0'/.test(renderer));
   check('CSS 有[data-expanded="1"] 的展开态样式',
     /\[data-expanded="1"\]/.test(styles));
   check('过渡时长与 Swift 的 .spring(response:0.34) 对齐',
     /--spring-ms:\s*340ms/.test(styles), 'Swift 侧是 0.34s');
+  check('圆角口径与 Mac 一致（折叠 12 / 展开 20）',
+    /--r-collapsed:\s*12px/.test(styles) && /--r-expanded:\s*20px/.test(styles));
 }
 
 console.log('\n=== S9: 桥的 pending 必须一路透传到界面 ===');
@@ -219,59 +216,69 @@ console.log('\n=== S9: 桥的 pending 必须一路透传到界面 ===');
     /\.pending\s*\{[^}]*color:\s*#FFAA00/.test(styles));
 }
 
-console.log('\n=== S10: 动效契约（形变/驻留/等待展开/门控） ===');
-// 这套东西横跨三个文件 + CSS，失配的症状全是「看起来不对」而非报错：
-//   - 高度动画没有 ResizeObserver 跟随 → 内容动了、窗口不动，半途被裁；
-//   - 折叠时立即 setExpanded(false) → 主进程把窗口一把设回折叠尺寸，
-//     缩矮弹簧播到一半被拦腰截断；
-//   - 错峰入场不设 data-fresh 门 → 快照每拍重建 innerHTML，行每拍重播，
-//     列表看起来一直在抖；
-//   - 悬停没有驻留门槛 → 鼠标划过屏幕顶端去点最大化，岛一路误触展开。
-// 逐条钉住，改任何一处都得三处一起想。
+console.log('\n=== S10: 交互与动效契约（Mac 对齐口径） ===');
+// 设计口径逐条来自 swift/UI/NotchContentView.swift，失配的症状全是
+// 「看起来不如 Mac」而非报错，所以用源码断言钉死：
+//   - 驻留 200/350（Mac 0.2s 展开 / 0.35s 收起）
+//   - 等待确认自动展开（Mac 同款）
+//   - 穿透切换靠转发 mousemove 的命中判定（窗口大、岛小，热区必须按岛算）
+//   - 高度弹簧写在 .island 上，窗口不动
+//   - 光效 = 顶部内发光带 + 沿剪影外发光，受 glowEffect 门控
 {
-  const html = read('index.html');
-
-  check('index.html 有 .body 内容筒（高度动画的载体）',
-    /class="body"/.test(html) && /id="content"/.test(html));
-  check('.body 必须 overflow:hidden（缩矮半途底部内容本来就该被裁）',
-    /\.body\s*\{[\s\S]{0,200}?overflow:\s*hidden/.test(styles));
-  check('.body 的 height 走同一条弹簧（与 width/neck 一致才读作「一起张开」）',
-    /\.body\s*\{[\s\S]{0,260}?transition:\s*height var\(--spring-ms\) var\(--spring\)/.test(styles));
-  check('.island 的 width 参与形变（折叠窄、展开宽）',
-    /\.island\s*\{[\s\S]{0,500}?transition:\s*width var\(--spring-ms\) var\(--spring\)/.test(styles));
-  check('宽度只差一档（差大了就从「岛」变成「弹窗」）',
-    /--w-collapsed:\s*380px/.test(styles) && /--w-expanded:\s*412px/.test(styles));
-
-  check('渲染层用 ResizeObserver 把逐帧尺寸回传主进程',
-    /new ResizeObserver\(\(\) => requestResize\(\)\)\.observe/.test(renderer));
-  check('尺寸回传量实测宽（写死 380 会在宽度动画半途裁右侧）',
-    /const w = island\.offsetWidth;/.test(renderer));
-  check('折叠方向等动画播完再报主进程（否则弹簧被一把截断）',
-    /COLLAPSE_SETTLE_MS/.test(renderer) && /setExpanded\(false\)/.test(renderer));
-  check('悬停有驻留门槛（开慢关快，与 macOS 版同一手感）',
-    /HOVER_OPEN_MS = 180/.test(renderer) && /HOVER_CLOSE_MS = 120/.test(renderer));
+  check('悬停驻留与 Mac 同档（开 200ms / 收 350ms）',
+    /HOVER_OPEN_MS = 200/.test(renderer) && /HOVER_CLOSE_MS = 350/.test(renderer));
   check('「等待确认」自动展开（与 macOS 版同一条纪律）',
     /entries\[0\]\.status === 'waiting'/.test(renderer));
 
-  check('错峰入场有 data-fresh 门（防每拍重播）',
-    /dataset\.fresh = '1'/.test(renderer) && /\[data-fresh="1"\] \.row/.test(styles));
-  check('行带 --i 序号与 --dot 状态色',
-    /--i:' \+ \(i \|\| 0\)/.test(renderer) && /--dot:' \+ esc\(e\.glow/.test(renderer));
-  check('主行状态点带状态类（waiting 加急呼吸靠它）',
-    /st-' \+ esc\(e\.status\)/.test(renderer) && /\.st-waiting/.test(styles));
+  check('渲染层用岛的当前矩形做命中（不是拿窗口当热区）',
+    /function hitIsland/.test(renderer) && /getBoundingClientRect\(\)/.test(renderer));
+  check('命中翻转才发穿透切换 IPC（平时零开销）',
+    /window\.island\.setInteractive\(over\)/.test(renderer));
+  check('折叠态热区外扩 8px（Mac hoverHotRect 的 insetBy(-8)）',
+    /HOT_MARGIN_PX = 8/.test(renderer));
+  check('穿透窗口的悬停靠转发的 mousemove 驱动',
+    /document\.addEventListener\('mousemove'/.test(renderer));
+  check('岛尺寸变化后重估指针命中（展开收起会翻转在/不在）',
+    /evaluatePointer\(\);/.test(renderer));
 
-  check('装饰动效受 glowEffect 门控（关掉只剩信息，不剩光）',
+  check('高度弹簧写在 .island 上（from→to 显式值 + 收尾释放）',
+    /function animateIslandHeight/.test(renderer)
+      && /island\.style\.height = Math\.round\(from\) \+ 'px'/.test(renderer)
+      && /island\.style\.height = Math\.round\(natural\) \+ 'px'/.test(renderer));
+  check('渲染层不再驱动窗口尺寸（架构上就不该有）',
+    !/island\.resize\(/.test(renderer) && !/ResizeObserver/.test(renderer));
+  check('宽/高/圆角共用同一条弹簧（一起动才读作「张开」）',
+    /transition: width var\(--spring-ms\) var\(--spring\),[\s\S]{0,120}height var\(--spring-ms\) var\(--spring\),[\s\S]{0,120}border-radius var\(--spring-ms\) var\(--spring\)/.test(styles));
+
+  check('内发光带口径与 Mac 一致（34 / 48，34% → 0）',
+    /--band-collapsed:\s*34px/.test(styles) && /--band-expanded:\s*48px/.test(styles)
+      && /var\(--glow\) 34%, transparent/.test(styles));
+  check('外发光沿剪影、跟活跃状态走（data-live）',
+    /\[data-live="1"\]/.test(styles) && /box-shadow/.test(styles));
+  check('状态点 6px（Mac 口径，不是 9px）',
+    /\.dot\s*\{[\s\S]{0,200}?width: 6px/.test(styles));
+  check('装饰光受 glowEffect 门控（关掉只剩信息，不剩光）',
     /dataset\.glow = glowOn \? '1' : '0'/.test(renderer)
-      && /\[data-glow="1"\]/.test(styles));
-  check('底部活动线与待确认呼吸都在（sheen / attention）',
-    /@keyframes sheen/.test(styles) && /@keyframes attention/.test(styles));
-  check('声呐环 keyframes 在（dot-ping）',
-    /@keyframes dot-ping/.test(styles));
+      && /\[data-glow="0"\]/.test(styles));
   check('prefers-reduced-motion 全量让位（无障碍）',
     /@media \(prefers-reduced-motion: reduce\)/.test(styles));
 
-  check('冒烟模式落两张截图（跑通≠长得对，图才算数）',
-    /capturePage\(\)/.test(main) && /smoke-collapsed\.png/.test(main) && /smoke-expanded\.png/.test(main));
+  check('折叠态有胶囊/仪表（Mac compactRow 口径）',
+    /class="chip"/.test(renderer) && /class="gauge/.test(renderer));
+  check('展开态有头部徽标 + 详情块 + 待办行（Mac HUD 口径）',
+    /className = 'hdr'/.test(renderer) && /className = 'detail'/.test(renderer)
+      && /className = 'todo'/.test(renderer));
+  check('monitor 补齐了 HUD 数据字段（detailText/actionText/todoCurrent）',
+    (() => {
+      const mon = fs.readFileSync(path.join(SRC, 'monitor.js'), 'utf8');
+      return /e\.detailText = a\.detail/.test(mon) && /e\.actionText = a\.title/.test(mon)
+        && /e\.todoCurrent = /.test(mon);
+    })());
+
+  check('冒烟按岛体矩形裁剪截图（不带窗口 bleed）',
+    /capturePage\(rect\)/.test(main) && /smoke-collapsed\.png/.test(main) && /smoke-expanded\.png/.test(main));
+  check('冒烟用合成 mousemove 触发展开（穿透窗口只认转发事件）',
+    /new MouseEvent\('mousemove'/.test(main));
 }
 
 console.log('\n' + '='.repeat(44));

@@ -275,6 +275,12 @@ function decorate(entry, now) {
   e.subagentText = a.pendingAgents > 0 ? String(a.pendingAgents) : null;
   e.label = entry.label;
   e.shortId = shortId(entry.id);
+  // 展开态的三块 UI 数据（口径对照 Swift NotchContentView）：
+  // detailText → 详情正文块；actionText → 会话行的「当前动作」列；
+  // todoCurrent → 待办行的当前项。
+  e.detailText = a.detail || null;
+  e.actionText = a.title || null;
+  e.todoCurrent = (p && p.todoCurrent) || null;
   return e;
 }
 

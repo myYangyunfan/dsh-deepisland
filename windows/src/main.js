@@ -2,14 +2,24 @@
 /**
  * Electron 主进程 —— Windows 版灵动岛。
  *
+ * ## 架构（macOS 版同款，丝滑的来源）
+ *
+ * 窗口按**最大展开态**一次开好（MAX_WINDOW），顶端钉在屏幕顶端、水平居中；
+ * 展开收起只是岛体在窗口里改宽改高（渲染层 CSS 弹簧）—— 窗口不动，
+ * 动画全程 GPU 合成。「逐帧 setBounds 跟随内容」的老路在 DWM 上必然抖：
+ * 层化透明窗口的尺寸变化走不了合成器快路径。
+ *
+ * 窗口平时**鼠标穿透**（setIgnoreMouseEvents(true, {forward:true})），
+ * 只有指针进岛时渲染层才调 island:set-interactive 临时接管 —— 比岛大一圈
+ * 的透明区域（bleed，给外发光留的）不吞下方应用的点击。
+ *
  * ## 为什么是 Electron 而不是手写 Win32
  *
  * 要一个「浮在所有窗口之上、不吃鼠标、半透明、无边框」的小窗，手写 Win32
  * 需要自己搭 `WS_EX_LAYERED` / `WS_EX_TRANSPARENT` / `SetWindowPos(HWND_TOPMOST)`
  * 一整套 —— 工作量远大于 UI 本身，而且「不吃鼠标」和「要能点」这对矛盾需求
- * 得靠 `WM_NCHITTEST` 逐像素判。Electron 一个 `BrowserWindow` 选项就够。
- *
- * 代价是 ~80MB 的安装包。对本项目的定位（一个盯着 DSH 的常驻小挂件）可以接受。
+ * 得靠 `WM_NCHITTEST` 逐像素判。Electron 一组选项就够（穿透由我们自己在
+ * 渲染层做命中切换，等价于 Mac 的 NotchPanel.isInteractive）。
  *
  * ## 几个不能省的选项
  *
@@ -51,46 +61,35 @@ const { performJump } = require('./jump.js');
 /** 轮询间隔。与 Swift 版一致 —— 250ms 是「跟手」与「不烧 CPU」的交点。 */
 const TICK_MS = 250;
 
-/** 折叠态尺寸（未乘 scale）。 */
-const COLLAPSED = { w: 380, h: 46 };
-/** 展开态尺寸上限（未乘 scale）。 */
-const EXPANDED_MAX = { w: 420, h: 300 };
-const EXPANDED_MIN = { w: 380, h: 120 };
-
 /**
- * 连接器伸出屏幕顶边的长度（CSS px，未乘 scale）。
+ * 固定窗口尺寸：按**最大展开态**一次开好（macOS 版 NotchMetrics 的
+ * maxExpandedSize + bleed 同款结论）。
  *
- * ## 为什么窗口要往上挪
+ * 展开收起只是岛体在窗口里改宽改高（CSS 弹簧），窗口一个字节都不动 ——
+ * 「逐帧 setBounds」的老路在 DWM 上必然抖（层化透明窗口的尺寸变化
+ * 走不了合成器快路径），这是 macOS 丝滑、旧 Windows 版发涩的分水岭。
  *
- * `.neck` 用负margin-top 把自己顶到 .island 之上，但那只在**窗口内**成立——
- * 窗口顶边仍是一道看得见的边，方角也会露在屏幕里，读作「悬浮的黑盒子」。
- *
- * 要让它读作「从屏幕顶边长出来」，方角必须落在屏幕边界**之外**。
- * 做法就是把窗口 y 设成负值，让整个窗口的上缘探到屏幕上方去。
- * 那部分本来就不在屏幕里，谁也看不见。
- *
- * 数值取 10：与 CSS 里 .neck 的默认高度一致，两边对不齐就会露边。
+ * 比最大内容（岛体最宽 436）大一圈的部分是 **bleed**：给外发光留绘制
+ * 空间。窗口平时鼠标穿透，多出来的透明区域不吞下方应用的点击。
  */
-const NECK_OVERHANG = 10;
+const MAX_WINDOW = { w: 484, h: 300 };
 
 let win = null;
 let tray = null;
 let monitor = null;
 let tickIndex = 0;
-let expanded = false;
 let lastSnapshotJson = '';
 let bridgeState = { ok: false, port: bridge.FALLBACK_PORT, plugin: null };
 let lastJump = null;       // { kind, brief, at }
 let requestedHidden = false;
 let forceShow = false;     // 仅冒烟模式用：无条件显示
-let lastRequested = { w: COLLAPSED.w, h: COLLAPSED.h };
 
 // ───────────────────────────── 单实例 ─────────────────────────────
 
 /**
  * 关掉硬件加速，用软件渲染。
  *
- * 岛上只有文字、圆角和一点阴影，没有视频也没有 3D —— GPU 完全用不上。
+ * 岛上只有文字、圆角和一点光晕，没有视频也没有 3D —— GPU 完全用不上。
  * 而 GPU 进程在部分机器上（无显卡驱动、远程桌面、受限沙箱）会**反复崩溃**，
  * 崩够次数后 Chromium 直接 `FATAL: GPU process isn't usable. Goodbye.`
  * 把整个 app 带走。实测在本机受限环境下必现。软件渲染没这个风险，
@@ -131,51 +130,32 @@ function assetPath(name) {
 }
 
 /**
- * 把窗口摆到主显示器顶部中间，并设成给定尺寸（CSS px，内部会乘 scale）。
+ * 把窗口摆到主显示器顶部中间。尺寸恒为 MAX_WINDOW × scale —— 本函数
+ * 只在启动、scale 变化、显示器几何变化时被调用，**不参与展开动画**
+ * （那是渲染层在窗口内部的 CSS 弹簧，碰窗口就会抖）。
  *
- * ## 为什么用 `setBounds` 而不是 `setSize` + `setPosition`
- *
- * 实测（scaleFactor = 1.75 的机器上）：**分开调这两个会漂移** ——
- * 每调一次窗口长大约 1~2 px，几秒钟就能从 380×46 涨到 400×60 以上，
- * 岛会越用越大。原因是 DWM 的 resize 动画叠加 DPI 取整，两次调用之间
- * 读到的尺寸不是最终值。改成一次 `setBounds` 原子地给全四个值，实测稳定。
- *
- * 这个坑不难复现但很难从现象猜到原因（只看到「岛在慢慢变大」）。
+ * y = workArea.y：窗口顶端与屏幕（工作区）顶端重合，岛体顶端的两个方角
+ * 落在屏幕边界上 —— 「从屏幕顶边长出来」的读感由此而来（macOS 版
+ * windowOrigin 的同一条纪律：窗口顶端 = 屏幕顶端，不留顶部 bleed）。
  */
-function placeWindow(w, h, force = false) {
-  lastRequested = { w, h };
+function placeWindow(force = false) {
   if (!win || win.isDestroyed()) return;
   const scale = win._scale || 1;
-  const ww = Math.round(w * scale);
-  // 窗口要比内容**高出一截**NECK_OVERHANG。
-  //
-  // 为什么不直接用 h：.neck 是负 margin，它占据的位置在 .island 的 box 之上，
-  // 而 offsetHeight 量的是 .island 的 border-box —— **不含**那段。
-  // 若窗口正好等于 h，颈部会被窗口边界裁掉，方角又露在屏幕里，
-  // 于是「连接器」这件事完全白做（而且只在截图里才看得出来）。
-  const hh = Math.round((h + NECK_OVERHANG) * scale);
+  const ww = Math.round(MAX_WINDOW.w * scale);
+  const hh = Math.round(MAX_WINDOW.h * scale);
   const area = screen.getPrimaryDisplay().workArea;
   const x = Math.round(area.x + (area.width - ww) / 2);
-  // y 往上探 NECK_OVERHANG，让连接器的方角落到屏幕顶边之外（见 NECK_OVERHANG 注释）。
-  //
-  // 用 `area.y - 探出量` 而不是硬编码 0：显示器有任务栏且位于**上方**时
-  // workArea.y 本身是正的，岛会跟着任务栏往下挪一截；
-  // 不跟着算的话，连接器就会浮在任务栏下面而不是屏幕边缘，读作「贴了个膏药」。
-  //
-  // 屏幕顶边不能真被盖住：workArea.y 为负（任务栏在上）时，y 会算得更负，
-  // 相当于把岛推进屏幕外的区域，用户就看不见它了。所以钳到 workArea 上沿之内 ——
-  // 宁可连接器露一点边，也不要整个岛消失。
-  const y = Math.max(area.y, Math.round(area.y - NECK_OVERHANG * scale));
+  const y = area.y;
 
-  // 容差 2px：DPI 取整会让「设 380 读到 381」，没有容差就会每拍重设一次，
-  // 白白触发 DWM 的 resize 动画。2px 在 380 宽的岛上看不出来。
+  // 容差 2px：DPI 取整会让「设 484 读到 485」，没有容差就会反复重设，
+  // 白白触发 DWM 的窗口动画。2px 在这个尺寸上看不出来。
   const TOL = 2;
   const b = win.getBounds();
   if (!force
     && Math.abs(b.width - ww) <= TOL && Math.abs(b.height - hh) <= TOL
     && Math.abs(b.x - x) <= TOL && Math.abs(b.y - y) <= TOL) return;
   if (process.env.DSH_NOTCH_VERBOSE) {
-    console.log('[dsh-notch] resize ' + b.width + 'x' + b.height + ' → ' + ww + 'x' + hh);
+    console.log('[dsh-notch] place ' + b.width + 'x' + b.height + ' → ' + ww + 'x' + hh);
   }
   win.setBounds({ x, y, width: ww, height: hh });
 }
@@ -184,8 +164,8 @@ function createWindow() {
   const cfg = config.load();
 
   win = new BrowserWindow({
-    width: Math.round(COLLAPSED.w * cfg.scale),
-    height: Math.round(COLLAPSED.h * cfg.scale),
+    width: Math.round(MAX_WINDOW.w * cfg.scale),
+    height: Math.round(MAX_WINDOW.h * cfg.scale),
     frame: false,
     transparent: true,
     backgroundColor: '#00000000',
@@ -216,6 +196,10 @@ function createWindow() {
   win.setAlwaysOnTop(true, 'floating');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
+  // 穿透为常态：forward 让 mousemove 仍被转发进渲染层（命中判定靠它），
+  // 指针进岛时渲染层会调 island:set-interactive 临时接管。
+  win.setIgnoreMouseEvents(true, { forward: true });
+
   win.loadFile(path.join(__dirname, 'index.html'));
 
   // 任何形式的「打开新窗口」都不允许 —— 岛只有一个窗口
@@ -230,7 +214,7 @@ function createWindow() {
     applyVisibility();
   });
 
-  placeWindow(COLLAPSED.w, COLLAPSED.h);
+  placeWindow();
   // 先不 show —— 等首帧快照到了由 applyVisibility 决定
 }
 
@@ -301,7 +285,7 @@ function bringDshToFront() {
     try { if (w.isMinimized()) w.restore(); w.show(); w.focus(); return { ok: true, how: 'window' }; }
     catch { /* 试下一条 */ }
   }
-  // 路 2：现有实例已经持有单实例锁 —— 再问一次会唤起它
+  // 路 2：现有实例已经持有单实例锁 —— 再起一个会唤起它
   return { ok: false, how: 'single-instance' };
 }
 
@@ -374,7 +358,6 @@ function snapshot() {
       raw: cfg.raw,
     },
     bridge: bridgeState,
-    expanded,
     jump: lastJump,
   };
 }
@@ -410,6 +393,13 @@ function startLoop() {
     // 配置可能在两次 tick 之间被设置面板改了
     applyVisibility();
 
+    // scale 变化要重摆窗口（尺寸 = MAX_WINDOW × scale），其余几何不变
+    const wantScale = config.load().scale || 1;
+    if (win && !win.isDestroyed() && (win._scale || 1) !== wantScale) {
+      win._scale = wantScale;
+      placeWindow();
+    }
+
     // 每 8 拍探一次桥（约 2s）—— 桥起没起不需要 250ms 精度
     if (tickIndex % 8 === 1) {
       bridge.health().then((r) => {
@@ -432,13 +422,13 @@ function startLoop() {
   //
   // 存在的理由：UI 层（renderer.js / styles.css）在纯 Node 自检里测不到，
   // 而「没跑过的 UI 代码」等于没写。这个开关让 CI 能真的把岛显示出来、
-  // 读回渲染后的文本与窗口尺寸，再自己退出。
+  // 读回渲染后的文本与岛体尺寸，再自己退出。
   //
-  // 除了读文本，还会**落两张截图**（折叠态 + 展开态）：动画/布局这类
-  // 「跑通了但长得不对」的问题只有看图能发现。截图目录由
-  // DSH_NOTCH_SMOKE_DIR 指定（默认与冒烟输出同目录，再退 %APPDATA%\DSHNotch）。
-  // 展开态用合成 mouseenter 触发 —— 渲染层有悬停驻留门槛，直接 dispatch
-  // 事件即可跨过定时器（listener 不校验 isTrusted）。
+  // 除了读文本，还会**落两张截图**（折叠态 + 展开态，按岛体实际矩形裁剪，
+  // 不带窗口的 bleed 留白）：动画/布局这类「跑通了但长得不对」的问题只有
+  // 看图能发现。截图目录由 DSH_NOTCH_SMOKE_DIR 指定（默认与冒烟输出同目录，
+  // 再退 %APPDATA%\DSHNotch）。展开态用合成 mousemove 触发 —— 窗口平时
+  // 鼠标穿透，渲染层的命中判定吃的就是这些转发事件（listener 不校验 isTrusted）。
   if (process.env.DSH_NOTCH_SMOKE === '1') {
     forceShow = true;
     setTimeout(async () => {
@@ -450,9 +440,19 @@ function startLoop() {
         || (process.env.DSH_NOTCH_SMOKE_OUT
           ? path.dirname(process.env.DSH_NOTCH_SMOKE_OUT)
           : path.join(process.env.APPDATA || '.', 'DSHNotch'));
-      const shot = async (name) => {
+      const readIsland = async () => win.webContents.executeJavaScript(`(() => {
+        const i = document.getElementById('island');
+        const r = i.getBoundingClientRect();
+        return { text: i.innerText, x: r.left, y: r.top, w: r.width, h: r.height };
+      })()`);
+      const shot = async (name, box) => {
         try {
-          const img = await win.webContents.capturePage();
+          // capturePage 要 {x,y,width,height} 且取整（getBoundingClientRect 是小数）
+          const rect = {
+            x: Math.round(box.x), y: Math.round(box.y),
+            width: Math.round(box.w), height: Math.round(box.h),
+          };
+          const img = await win.webContents.capturePage(rect);
           fs.mkdirSync(shotDir, { recursive: true });
           const file = path.join(shotDir, name);
           fs.writeFileSync(file, img.toPNG());
@@ -461,27 +461,24 @@ function startLoop() {
           lines.push('截图失败（' + name + '）: ' + (e && e.message));
         }
       };
-      const readIsland = async () => {
-        const text = await win.webContents.executeJavaScript(
-          'document.getElementById("island").innerText');
-        const size = win.getSize();
-        return { text, size };
-      };
       try {
-        // 折叠态：文本 + 尺寸 + 截图
+        // 折叠态：文本 + 岛体矩形 + 截图（窗口恒定，量的是岛自己的尺寸）
         const c = await readIsland();
         lines.push('折叠文本 = ' + JSON.stringify(c.text));
-        lines.push('折叠尺寸 = ' + c.size.join('x'));
-        await shot('smoke-collapsed.png');
+        lines.push('折叠岛体 = ' + Math.round(c.w) + 'x' + Math.round(c.h));
+        await shot('smoke-collapsed.png', c);
 
-        // 展开态：合成悬停 → 等形变弹簧走完 → 再量再截
-        await win.webContents.executeJavaScript(
-          'document.dispatchEvent(new MouseEvent("mouseenter"))');
-        await new Promise((r) => setTimeout(r, 900));
+        // 展开态：把指针「挪」到岛心（穿透窗口只认转发的 mousemove）→ 等驻留+弹簧 → 再量再截
+        const fire = (x, y) => win.webContents.executeJavaScript(
+          `document.dispatchEvent(new MouseEvent('mousemove', { clientX: ${x}, clientY: ${y} }))`);
+        await fire(Math.round(c.x + c.w / 2), Math.round(c.y + c.h / 2));
+        await new Promise((r) => setTimeout(r, 250));   // 跨过 200ms 驻留门槛
+        await fire(Math.round(c.x + c.w / 2), Math.round(c.y + c.h / 2) + 4);
+        await new Promise((r) => setTimeout(r, 750));   // 等弹簧走完
         const e = await readIsland();
         lines.push('展开文本 = ' + JSON.stringify(e.text));
-        lines.push('展开尺寸 = ' + e.size.join('x'));
-        await shot('smoke-expanded.png');
+        lines.push('展开岛体 = ' + Math.round(e.w) + 'x' + Math.round(e.h));
+        await shot('smoke-expanded.png', e);
         lines.push('会话数 = ' + (JSON.parse(lastSnapshotJson).entries || []).length);
 
         for (const l of lines) console.log('[smoke] ' + l);
@@ -551,20 +548,20 @@ ipcMain.handle('island:jump', async (_e, payload) => {
   return { ok: outcome.isSuccess, brief: outcome.brief, kind: outcome.kind };
 });
 
-ipcMain.handle('island:resize', (_e, payload) => {
-  if (!win) return false;
-  // clamp 的上/下限是「.island 内容高」，而 placeWindow 会自己加 NECK_OVERHANG，
-  // 所以这里**不能**把颈部算进上下限 —— 否则窗口会比内容高出 2 倍颈部。
-  const w = clamp(payload && payload.width, EXPANDED_MIN.w, EXPANDED_MAX.w) || COLLAPSED.w;
-  const h = clamp(payload && payload.height, COLLAPSED.h, EXPANDED_MAX.h) || COLLAPSED.h;
-  placeWindow(w, h);
+/**
+ * 指针进岛/出岛：切窗口的点击穿透。判定在渲染层（它有岛的当前矩形和
+ * 转发来的指针位置），这里只执行。穿透是常态，进岛才临时接管 ——
+ * macOS 版 NotchPanel.isInteractive 的同一条纪律。
+ */
+ipcMain.handle('island:set-interactive', (_e, value) => {
+  if (win && !win.isDestroyed()) {
+    try {
+      win.setIgnoreMouseEvents(!value, { forward: true });
+    } catch (e) {
+      trace('[trace] setIgnoreMouseEvents 失败: ' + (e && e.message));
+    }
+  }
   return true;
-});
-
-ipcMain.handle('island:expand', (_e, value) => {
-  expanded = !!value;
-  if (!expanded) placeWindow(COLLAPSED.w, COLLAPSED.h);
-  return expanded;
 });
 
 ipcMain.handle('island:hide', () => {
@@ -596,12 +593,6 @@ ipcMain.handle('island:open-config-dir', () => {
 });
 
 // ───────────────────────────── 工具 ─────────────────────────────
-
-function clamp(v, lo, hi) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return null;
-  return Math.min(hi, Math.max(lo, Math.round(n)));
-}
 
 /** 32×32 的纯色 PNG（托盘图标缺失时的兜底，保证托盘一定存在）。 */
 function makeFallbackPng(size) {
@@ -663,15 +654,11 @@ app.on('ready', () => {
   trace('[trace] 轮询已起');
 
   // 显示器变了（插拔外接屏 / 改分辨率）→ 重新定位，否则岛会飘到屏幕外
-  const repo = () => placeWindow(lastRequested.w, lastRequested.h, true);
+  const repo = () => placeWindow(true);
   screen.on('display-added', repo);
   screen.on('display-removed', repo);
   screen.on('display-metrics-changed', repo);
 });
-
-function currentSize() {
-  return win ? win.getBounds() : { width: COLLAPSED.w, height: COLLAPSED.h };
-}
 
 app.on('window-all-closed', () => {
   // Windows 上关窗不等于退出：岛靠托盘活着
