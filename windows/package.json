@@ -1,7 +1,7 @@
 {
   "name": "dsh-notch-windows",
   "productName": "DSHNotch",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "DSH（DeepSeek Harness）灵动岛 · Windows 端",
   "main": "src/main.js",
   "scripts": {
