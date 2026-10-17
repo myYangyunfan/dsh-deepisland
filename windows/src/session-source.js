@@ -72,11 +72,32 @@ function latestSessionFile() {
   return f.length ? f[0].file : null;
 }
 
-/** 递归找出所有 `session.v4.jsonl.zstd`。 */
+let cachedScan = null;
+let lastScanTime = 0;
+const SCAN_CACHE_MS = 800;
+
+/** 递归找出所有 `session.v4.jsonl.zstd`。带 800ms 快速缓存，避免 250ms 高频全盘递归。 */
 function scanAllSessionFiles() {
+  const now = Date.now();
+  if (cachedScan && (now - lastScanTime < SCAN_CACHE_MS)) {
+    // 命中短期缓存：仅快速刷新前 3 个活跃文件的 stat，毫秒级返回
+    for (let i = 0; i < Math.min(3, cachedScan.length); i++) {
+      try {
+        const st = fs.statSync(cachedScan[i].file);
+        cachedScan[i].mtimeMs = st.mtimeMs;
+        cachedScan[i].size = st.size;
+      } catch {}
+    }
+    return cachedScan.slice();
+  }
+
   const sessionsDir = path.join(dshRoot(), 'sessions');
   const out = [];
-  if (!fs.existsSync(sessionsDir)) return out;
+  if (!fs.existsSync(sessionsDir)) {
+    cachedScan = out;
+    lastScanTime = now;
+    return out;
+  }
 
   // 手写递归而不是用 withFileTypes 的迭代器：DSH 的目录层级很浅
   // （sessions/<项目>/<会话>/文件），但项目目录可能很多，
@@ -108,6 +129,9 @@ function scanAllSessionFiles() {
     }
   };
   walk(sessionsDir, 0);
+
+  cachedScan = out;
+  lastScanTime = now;
   return out;
 }
 
@@ -133,6 +157,9 @@ function prettyProject(raw) {
 
 /** mtime+size 缓存：避免每 250ms 重新解压同一个文件。 */
 const eventCache = new Map();
+
+/** zstd 帧标准魔数 0xFD2FB528 (小端序 28 b5 2f fd) */
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 
 /**
  * 读并解码某个会话文件的事件流。
@@ -170,7 +197,9 @@ function loadLatestEvents() {
 }
 
 /**
- * zstd 解压。
+ * zstd 多帧串联流解压。
+ * DSH 在会话过程中是按帧追加写入的（multi-frame concatenated zstd stream）。
+ * Node 内置的 zlib.zstdDecompressSync 单次只解压第 1 帧，必须切片解压全部帧并合并。
  * @returns {string|null} 解压后的文本；不可用/失败返回 null
  */
 function decompress(file) {
@@ -187,16 +216,55 @@ function decompress(file) {
   if (typeof zlib.zstdDecompressSync !== 'function') {
     return null;
   }
-  try {
-    return zlib.zstdDecompressSync(data).toString('utf8');
-  } catch {
-    return null;   // 文件正在被写，可能截断；下一拍会重试
+
+  // 1. 快速单帧探测
+  const first = data.indexOf(ZSTD_MAGIC);
+  if (first === -1) {
+    try {
+      return zlib.zstdDecompressSync(data).toString('utf8');
+    } catch {
+      return null;
+    }
   }
+
+  const second = data.indexOf(ZSTD_MAGIC, first + 4);
+  if (second === -1) {
+    // 只有 1 个标准帧
+    try {
+      return zlib.zstdDecompressSync(data).toString('utf8');
+    } catch {
+      return null;
+    }
+  }
+
+  // 2. 多帧流：定位所有帧魔数并循环解压合并
+  const chunks = [];
+  const offsets = [];
+  let pos = first;
+  while (pos !== -1) {
+    offsets.push(pos);
+    pos = data.indexOf(ZSTD_MAGIC, pos + 4);
+  }
+
+  for (let i = 0; i < offsets.length; i++) {
+    const start = offsets[i];
+    const end = (i + 1 < offsets.length) ? offsets[i + 1] : data.length;
+    const slice = data.subarray(start, end);
+    try {
+      chunks.push(zlib.zstdDecompressSync(slice).toString('utf8'));
+    } catch {
+      // 容错：写到一半的文件末尾帧可能被截断，跳过不崩溃
+    }
+  }
+
+  return chunks.length > 0 ? chunks.join('') : null;
 }
 
 /** 清空缓存（自检用；正常路径靠 mtime 自动失效）。 */
 function invalidate() {
   eventCache.clear();
+  cachedScan = null;
+  lastScanTime = 0;
 }
 
 module.exports = {

@@ -191,11 +191,19 @@ class SessionMonitor {
           };
         }
 
-        // 先走事件游标（DSH 若写了 tool/* 事件，这里直接出结果）
+        // 先走事件游标（事件流是第一权威真相）
         let activity = st.cursor.apply(events, now, proj);
-        // 游标跑不出状态（真实数据现状）→ 由投影推
+        // 游标跑不出状态（如没有事件流或仅有session帧）→ 由投影推
         if (activity.status === STATUS.IDLE) {
-          activity = inferFromProjection(st.prev, proj, now, f.mtimeMs);
+          // 如果游标明确看到事件流里的回合已结束（sawTurnEnd），且投影没有未完成步骤，保持待命，避免误唤醒
+          if (st.cursor.sawTurnEnd && (!proj || !proj.hasOpenStep)) {
+            if (st.cursor.toolCount > 0) activity.toolCount = st.cursor.toolCount;
+          } else {
+            activity = inferFromProjection(st.prev, proj, now, f.mtimeMs);
+            if (st.cursor.toolCount > 0 && activity.toolCount === 0) {
+              activity.toolCount = st.cursor.toolCount;
+            }
+          }
         } else {
           activity = demoteIfStale(activity, st.cursor.lastEventTime, now);
           // 事件流给不出时，用投影兜住「在跑」的判定

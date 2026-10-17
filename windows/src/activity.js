@@ -137,6 +137,24 @@ function pickFrom(obj) {
   return parts.length ? parts.join(', ') : null;
 }
 
+/** 提取助手的思考或文本片段，优先取深度思考 reasoning */
+function extractMessageText(d) {
+  if (!d) return null;
+  if (typeof d.text === 'string' && d.text.trim()) return d.text.trim();
+  if (d.message && Array.isArray(d.message.content)) {
+    let reasoning = null;
+    let normalText = null;
+    for (const part of d.message.content) {
+      if (part && typeof part.text === 'string' && part.text.trim()) {
+        if (part.type === 'reasoning') reasoning = part.text.trim();
+        else if (part.type === 'text' || !part.type) normalText = part.text.trim();
+      }
+    }
+    return reasoning || normalText;
+  }
+  return null;
+}
+
 // ────────────────────────────── 游标 ──────────────────────────────
 
 /**
@@ -264,10 +282,18 @@ class ActivityCursor {
       cur.turnStartTime = this.turnStart;
       cur.status = STATUS.THINKING;
       cur.title = '正在分析与规划...';
-      cur.detail = '解析任务上下文中';
+      cur.detail = t === 'user/message' ? '收到指令，正在思考...' : '解析任务上下文中';
       cur.currentTool = null;
       cur.isWaitingApproval = false;
       cur.step = null;
+      return;
+    }
+
+    if (t === 'step/start') {
+      if (cur.status !== STATUS.TOOL && cur.status !== STATUS.WAITING) {
+        cur.status = STATUS.THINKING;
+        if (cur.title !== '正在分析与规划...') cur.title = STATUS_META.thinking.title;
+      }
       return;
     }
 
@@ -276,8 +302,9 @@ class ActivityCursor {
         cur.status = STATUS.THINKING;
         if (cur.title !== '正在分析与规划...') cur.title = STATUS_META.thinking.title;
       }
-      if (typeof d.text === 'string' && d.text.trim()) {
-        cur.detail = d.text.slice(-60);
+      const msgText = extractMessageText(d);
+      if (msgText) {
+        cur.detail = msgText.slice(-60);
       }
       return;
     }
