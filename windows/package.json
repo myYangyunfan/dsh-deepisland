@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node scripts/dev.js",
     "test": "node test/run.js",
+    "shots": "node scripts/shots.js",
     "icons": "node scripts/make-icons.js",
     "electron:install": "install-electron",
     "dist": "electron-builder --win --x64",
