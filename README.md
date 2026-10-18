@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-blue.svg)](#-平台支持)
 [![Version](https://img.shields.io/badge/Version-1.3.1-blue.svg)](https://github.com/myYangyunfan/dsh-deepisland/releases)
-[![Tests](https://img.shields.io/badge/Tests-336%20%2B%20311%20passing-brightgreen.svg)](#-开发与测试)
+[![Tests](https://img.shields.io/badge/Tests-336%20%2B%20507%20passing-brightgreen.svg)](#-开发与测试)
 
 <br>
 
@@ -28,10 +28,10 @@
 使用 DeepSeek Harness 进行长链路工程任务时，智能体常在后台经历漫长的深度思考与工具调用。切屏确认进度不仅打断心流，更难以及时响应人工审批请求。
 
 **DeepIsland** 将状态感知推向系统级前台：
-- **物理刘海融合**：macOS 顶端原生刘海硬件融合；Windows 顶端无边框亚克力居中贴边悬浮。
-- **双路状态仲裁**：优先扫描会话多帧 zstd 事件流，投影启发式兜底，毫秒级捕获思考与工具调用。
+- **物理刘海融合**：macOS 顶端原生刘海硬件融合；Windows 顶端无边框贴边悬浮（与 macOS 同一套视觉语言：纯黑底 + 状态色内发光带 + 沿剪影外发光）。
+- **双路状态仲裁**：优先跑会话多帧 zstd 事件流（`ActivityCursor`），投影启发式兜底；Windows 端实测事件流已含 `tool/call`、`turn/start`、`approval/*` 等完整状态事件。
 - **会话一键穿梭**：点击状态栏直接拉起 DSH 并聚焦至对应会话，零权限依赖、免键盘模拟。
-- **轻量极低开销**：增量游标追踪，每轮状态推断开销 < 0.001ms，后台内存占用 < 30MB。
+- **轻量低开销**：Windows 端快照只传渲染层真会读的 DTO 并按内容指纹（`rev`）去重推送，空闲/隐藏时轮询自适应降到 1s；渲染层热路径零强制同步布局、无全量 `innerHTML` 重建。实测数据见 [`windows/README.md`](./windows/README.md#性能基准scriptsperfjs)。
 
 ---
 
@@ -61,7 +61,8 @@
 
 - **深度思考链解析**：从 `assistant/message` 提取 `reasoning` 内容，长思考过程不再显示为空白等待。
 - **多会话并发管理**：最多同时追踪 6 个后台任务。状态优先级排序：`等待审批 > 工具执行 > 思考中 > 已完成 > 待命`。
-- **阻塞事件主动唤起**：检测到需要人工确认的敏感工具调用时，状态指示切换为琥珀色脉冲并自动展开 HUD。
+- **阻塞事件主动唤起**：检测到需要人工确认的敏感工具调用时，状态指示切换为琥珀色心跳脉冲并自动展开 HUD。
+- **界面与动效**：宽/高/圆角共用一条按 SwiftUI 弹簧解析式采样 61 点的 `linear()` 真弹簧；展开时内容按层阶梯入场；思考呼吸 / 工具流光 / 等待脉冲 / 完成微光，全部受「光效开关」与系统 `prefers-reduced-motion` 双重门控。
 - **无感本机跳转**：通过本机回环 HTTP 握手桥与 DSH 内部视图管理器联动，点击即可精准唤起并定位目标会话。
 - **自动防误唤醒**：内置回合结束标记识别（`sawTurnEnd`），会话交付后杜绝残存投影引发假性激活。
 
@@ -118,6 +119,8 @@ cd swift
 | **移出 0.35 秒** | 收起面板 | 平滑淡出，不干扰主屏幕操作 |
 | **单击岛体空白处** | 锁定 / 解锁常驻 | 常驻状态下鼠标移开不会自动收拢 |
 | **单击会话条目** | 穿梭跳转会话 | 拉起后台 DSH 窗口并切换至该会话上下文 |
+| **右键岛体** | 原生菜单 | 钉住/取消、隐藏、打开 DSH 设置、打开配置目录、退出（Windows v2） |
+| **HUD 键盘** | `↑/↓` 选行、`Enter` 跳转、`Esc` 取消钉住 | 键盘可达性与焦点环 |
 | **托盘 / 菜单栏图标** | 系统级控制菜单 | 快速开关灵动岛、开机启动项、重载配置 |
 
 ---
@@ -128,7 +131,7 @@ cd swift
 - **macOS**: `~/Library/Application Support/DSHNotch/client-config.json`
 - **Windows**: `%APPDATA%\DSHNotch\client-config.json`
 
-修改后立即生效（应用端 250ms 增量监听 `mtime`，无需重启）：
+修改后立即生效（应用端自适应轮询配置文件 `mtime`：活跃 250ms / 空闲或隐藏 1s，无需重启）：
 
 | 参数名 | 类型 | 默认值 | 描述 |
 | :--- | :---: | :---: | :--- |
@@ -188,7 +191,7 @@ cd swift
 | 平台 | 实现语言 | 视觉形态 | 系统兼容性 |
 | :--- | :--- | :--- | :--- |
 | **macOS** | Swift + AppKit (`NSPanel`) | 物理刘海吸附融合 | macOS 13.0 (Ventura) 及以上，原生适配 Apple Silicon / Intel |
-| **Windows** | Electron + HTML5 / CSS3 | 顶端无边框亚克力透明窗口 | Windows 10 / 11 64-bit |
+| **Windows** | Electron + HTML5 / CSS3 | 顶端无边框悬浮窗（纯黑底 + 状态光，与 macOS 同语言） | Windows 10 / 11 64-bit |
 
 ---
 
@@ -200,7 +203,7 @@ cd swift
 # 1. 运行插件端自动化测试（336 项测试用例全部通过）
 node test/run.mjs all
 
-# 2. 运行 Windows 原生端回归测试（311 项测试用例全部通过）
+# 2. 运行 Windows 原生端回归测试（507 项测试用例全部通过）
 cd windows && npm test
 
 # 3. 运行 macOS 原生端测试套件
@@ -208,6 +211,9 @@ cd swift && ./build.sh all-tests
 
 # 4. 驱动真实渲染层生成 2x 高清实机状态截图
 cd windows && npm run shots
+
+# 5. Windows 渲染层性能基准（与仓库基线对比；数字必须同机、同显示模式看）
+cd windows && npm run perf
 ```
 
 ---
