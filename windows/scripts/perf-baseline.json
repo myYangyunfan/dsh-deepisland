@@ -1,0 +1,115 @@
+{
+  "label": "baseline-8e2d8c2",
+  "src": "C:\\Users\\delinger\\AppData\\Local\\Temp\\deepisland-baseline-src",
+  "version": 1,
+  "git": null,
+  "durationMs": 4000,
+  "tickMs": 250,
+  "window": {
+    "width": 484,
+    "height": 300,
+    "dpr": 1.75,
+    "inner": [
+      486,
+      300
+    ]
+  },
+  "measurement": {
+    "showMode": "showInactive@opacity0.02",
+    "rendererPid": 11608
+  },
+  "displayHz": 240,
+  "output": "D:\\workspace\\deepisland\\windows\\scripts\\perf-baseline.json",
+  "frames": {
+    "count": 809,
+    "p50": 4.2,
+    "p95": 4.3,
+    "p99": 4.3,
+    "max": 550.1,
+    "fpsNominal": 238.1,
+    "dropped": 4,
+    "droppedPct": 0.49,
+    "longFrames16ms": 3
+  },
+  "longtask": {
+    "count": 1,
+    "totalMs": 58,
+    "maxMs": 58
+  },
+  "mutations": {
+    "records": 131,
+    "perSec": 32.8,
+    "structuralPerSec": 32.8
+  },
+  "expand": {
+    "transitions": 4,
+    "timeline": [
+      {
+        "t": 58,
+        "v": "0"
+      },
+      {
+        "t": 1025,
+        "v": "1"
+      },
+      {
+        "t": 2001,
+        "v": "0"
+      },
+      {
+        "t": 2502,
+        "v": "1"
+      }
+    ]
+  },
+  "errors": [],
+  "cpu": {
+    "samples": 16,
+    "avgPercent": 1.11,
+    "peakPercent": 3.22
+  },
+  "snapshot": {
+    "count": 16,
+    "perSec": 4,
+    "avgBytes": 2702,
+    "maxBytes": 4057,
+    "bytesPerSec": 10808.5,
+    "totalBytes": 43234
+  },
+  "dedupe": {
+    "duplicatePushes": 8,
+    "domMutations": 64,
+    "structuralMutations": 64,
+    "childListMutations": 40,
+    "attributeMutations": 24,
+    "cpu": {
+      "samples": 8,
+      "avgPercent": 0.48,
+      "peakPercent": 0.58
+    }
+  },
+  "idleDedupe": {
+    "duplicatePushes": 8,
+    "domMutations": 32,
+    "structuralMutations": 32,
+    "childListMutations": 8,
+    "attributeMutations": 24,
+    "cpu": {
+      "samples": 8,
+      "avgPercent": 0.38,
+      "peakPercent": 2.18
+    }
+  },
+  "finalIsland": {
+    "x": 53.142860412597656,
+    "y": 0,
+    "w": 380.0000305175781,
+    "h": 44.000003814697266,
+    "expanded": "0"
+  },
+  "ok": {
+    "framesCaptured": true,
+    "hoverExpandSeen": true,
+    "rendered": true
+  }
+}

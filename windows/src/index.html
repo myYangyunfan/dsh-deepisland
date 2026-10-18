@@ -10,30 +10,88 @@
   <!--
     岛的本体。窗口按**最大展开态**一次开好（见 main.js 的 MAX_WINDOW），
     本体顶对齐钉在窗口顶端、水平居中 —— 展开收起只是它自己在窗口里
-    改宽改高，窗口一个字节都不动，动画全程 60fps 不被 DWM 的窗口
-    尺寸动画拖累。这是 macOS 版（NotchPanel/NotchMetrics）的同款架构：
-    「窗口按最大展开态开，内容视图在内部动画」。
+    改宽改高，窗口一个字节都不动，动画不被 DWM 的窗口尺寸变化拖累。
 
-    ## 为什么没有 .neck 了
+    ## v2 结构（2026-10-18 全方面优化）
 
-    旧版窗口紧贴内容、逐帧跟尺寸，需要一段负 margin 的「连接器」把方角
-    推到屏幕外。现在窗口顶端就钉在屏幕顶边（y = workArea.y），岛体顶端
-    与屏幕顶端重合，顶边两个方角天然落在屏幕边界上 —— 与 Mac 的
-    「形状顶端 = 屏幕顶端」同一结论，无需额外机关。
+    旧版每次快照都 innerHTML 重建整块界面：展开动画每 340ms 被打断一次、
+    点过的会话行被销毁重建、每拍还强制同步布局一次。v2 改成「骨架只创建
+    一次、之后只改文本/属性」：
+
+      .island              尺寸与形变（width 由 [data-expanded] 驱动，
+                           height 由 --island-h 驱动，弹簧曲线在 CSS 里）
+        .island-clip       黑色底 + 圆角 + overflow 裁剪（外发光在它外面）
+          .band            状态色内发光带（纯装饰，glowEffect 门控）
+          .island-body     内容区（-webkit-app-region: no-drag，保证可点）
+            #pinned-hint
+            #compact       折叠态一行信息带
+            #hud           展开 HUD（头部/压力条/详情/待办/列表/统计/末行）
+
+    高度：渲染层用 ResizeObserver 量 .island-body 的自然高度，写进
+    --island-h（CSS 过渡到新值）。全程没有 offsetHeight 强制回流。
 
     ## 点击穿透
 
-    窗口平时 setIgnoreMouseEvents(true, {forward:true})：只有本体的像素
-    「底下有内容」时渲染层才请主进程临时接管（island:set-interactive），
-    其余透明区域全部穿透 —— 否则这个比岛大一圈的窗口会长期吞掉
-    它下方应用的点击。
+    窗口平时 setIgnoreMouseEvents(true, {forward:true})：只有指针真的落在
+    岛体矩形里，渲染层才请主进程临时接管；出岛/出窗立刻恢复穿透。主进程
+    另有一道 500ms 看门狗兜底（指针已出窗时强制收回），三道防线见
+    docs/windows-v2-contract.md §5。
   -->
-  <div id="island" class="island">
-    <div id="pinned-hint" class="pinned-hint"></div>
-    <div id="primary" class="primary"></div>
-    <div id="list" class="list"></div>
-    <div id="stats" class="stats"></div>
-    <div id="footer" class="footer"></div>
+  <div id="island" class="island"
+       data-mode="compact"
+       data-expanded="0"
+       data-live="0"
+       data-status="idle"
+       data-glow="1"
+       data-pinned="0">
+    <div class="island-clip">
+      <div class="band" aria-hidden="true"></div>
+      <div id="island-body" class="island-body">
+        <div id="pinned-hint" class="pinned-hint is-off"></div>
+
+        <!-- 折叠态：状态点 + 标题 + 一个胶囊 + 一个仪表 + 耗时（Mac compactRow 口径） -->
+        <div id="compact" class="compact">
+          <span id="c-dot" class="dot"></span>
+          <span id="c-title" class="title">DSH 待命</span>
+          <span id="c-chip" class="chip is-off"></span>
+          <span id="c-gauge" class="gauge is-off"></span>
+          <span id="c-elapsed" class="gauge elapsed mono is-off"></span>
+        </div>
+
+        <!-- 展开态：HUD（Mac expandedHUD 口径） -->
+        <div id="hud" class="hud">
+          <div class="hdr">
+            <span id="h-dot" class="dot"></span>
+            <span id="h-badge" class="badge">READY</span>
+            <span id="h-title" class="h-title">DSH 待命</span>
+            <span id="h-step" class="h-step mono is-off"></span>
+            <span id="h-hint" class="hint">点对话跳转 · 点状态行钉住</span>
+          </div>
+
+          <!-- 上下文压力条：进度只在 expanded 且有 contextFraction 时出现 -->
+          <div id="pressure" class="pressure is-off" role="progressbar" aria-label="上下文占用">
+            <div id="pressure-fill" class="pressure-fill"></div>
+          </div>
+
+          <div id="detail" class="detail is-off"><span id="detail-text" class="detail-text"></span></div>
+
+          <div id="todo" class="todo is-off">
+            <span class="todo-ico" aria-hidden="true"></span>
+            <span id="todo-cur" class="cur"></span>
+            <span id="todo-prog" class="prog mono"></span>
+          </div>
+
+          <div id="list" class="list"></div>
+          <div id="stats" class="stats"></div>
+
+          <div class="footer">
+            <span class="foot-left"><i id="bridge-dot" class="bridge-dot"></i><span id="bridge-text"></span></span>
+            <span id="jump" class="jump is-off"></span>
+            <span id="settings-link" class="link" data-act="settings">设置</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
   <script src="renderer.js"></script>
 </body>

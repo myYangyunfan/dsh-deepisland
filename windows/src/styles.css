@@ -1,24 +1,78 @@
-/* DSHNotch（Windows）—— 岛的样式。
+/* DSHNotch（Windows）—— 岛的样式 v2。
  *
  * 设计口径逐条对照 swift/UI/NotchContentView.swift 移植，两端看起来
  * 是同一个东西：
  *   - 底色纯黑（Mac 是 Color.black，不是深灰渐变）
  *   - 「光效」= 顶部一条状态色内发光带（34% → 0，折叠 34px / 展开 48px）
- *     + 沿形状剪影的一圈外发光（55%，blur 9~14，y 3）
- *   - 圆角 12（折叠）→ 20（展开）；状态点 6px；数字全部等宽
- *   - 弹簧 .spring(response:0.34, dampingFraction:0.8) —— CSS 用略带回弹的
- *     cubic-bezier 近似，宽/高/圆角一起动，才读作「张开」而不是「长高」
+ *     + 沿形状剪影的一圈外发光（55%，blur 14，y 3）
+ *   - 圆角 12（折叠）→ 20（展开）；顶平（方角落在屏幕边界上）；状态点 6px
+ *   - 数字全部等宽（tabular-nums）；发丝线白 8%；详情正文 rgb(166,214,255)
  *
- * ## 架构（丝滑的来源）
+ * ## v2 相对 v1 改了什么（全部是「为什么」，别只看现象）
+ *
+ * 1) 真弹簧。v1 的 cubic-bezier 是手调近似，过冲形状和 SwiftUI
+ *    `.spring(response:0.34, dampingFraction:0.8)` 对不上 —— 展开时「先冲
+ *    过头再回来」的幅度不对，读起来像 ease。v2 用按该弹簧解析式采样出的
+ *    61 点 `linear()`，宽度/高度/圆角共用同一条，与 Mac 端逐帧同形。
+ *
+ * 2) 发光换层。软件渲染下（main.js 关 hardware acceleration）对
+ *    `box-shadow` 做过渡 = 340ms 里每帧重绘一大片模糊，帧率直接塌。
+ *    v2 的外发光是独立伪元素 `.island::after`，阴影只栅格化一次，
+ *    状态切换只动它的 opacity（可被合成器接管）。所以本文件里
+ *    任何地方都不允许出现 `box-shadow` / `filter` 的 transition。
+ *
+ * 3) 高度外置。高度不再由内容 `height:auto` 撑着过场（那没法做弹簧），
+ *    改由 renderer 用 ResizeObserver 把内容自然高度写进 `--island-h`，
+ *    CSS 只负责把它过渡过去。`.island-body` 因此没有 padding ——
+ *    量到的 content-box 高度就是岛高，少一处「+padding」的对不齐。
+ *
+ * 4) 分层入场 + 状态动效。见 §入场、§状态动效。全部纯 transform/opacity，
+ *    不做过滤模糊；循环动画一律受 `data-glow` 与 `prefers-reduced-motion`
+ *    双重门控。
+ *
+ * ## 架构（丝滑的来源，与 v1 同）
  *
  * 窗口按最大展开态一次开好（main.js MAX_WINDOW），本体顶对齐、水平居中
- * 钉在窗口里 —— 展开收起只是 .island 自己改宽改高，窗口不动，
- * 动画全程 GPU 合成，不被 DWM 的窗口尺寸变化拖累。macOS 版
- * （NotchPanel「窗口按展开态取最大」）的同款结论。
+ * 钉在窗口里 —— 展开收起只是 .island 自己改宽改高，窗口不动，动画不被
+ * DWM 的窗口尺寸变化拖累。macOS 版（NotchPanel「窗口按展开态取最大」）同款。
  */
 
 :root {
   --scale: 1;
+
+  /* 主会话状态色：renderer 每拍按 status 写 :root 的 inline --glow
+     （Mac ActivityStatus.glowRGB）。这个默认灰只兜「首帧快照还没到」。 */
+  --glow: #50505A;
+  /* 单个状态点颜色：renderer 按元素写 inline（会话行各自的状态色） */
+  --dot: var(--glow);
+
+  /* 折叠宽。展开态由 [data-expanded="1"] 覆盖（契约 §3） */
+  --island-w: 380px;
+  --island-w-expanded: 436px;
+  /* 岛高：renderer 用 ResizeObserver 写 px。auto 只是首帧/旧渲染层兜底 */
+  --island-h: auto;
+
+  /* 真弹簧：SwiftUI .spring(response:0.34, dampingFraction:0.8)
+     （过冲 1.5%）按解析式采样 61 点。**不要**改回 cubic-bezier。 */
+  --spring: linear(0 0%, 0.0052 1.67%, 0.0196 3.33%, 0.0417 5%, 0.07 6.67%, 0.1034 8.33%, 0.1406 10%, 0.1808 11.67%, 0.2231 13.33%, 0.2666 15%, 0.3109 16.67%, 0.3552 18.33%, 0.3993 20%, 0.4425 21.67%, 0.4848 23.33%, 0.5257 25%, 0.5651 26.67%, 0.6028 28.33%, 0.6387 30%, 0.6727 31.67%, 0.7048 33.33%, 0.7348 35%, 0.763 36.67%, 0.7891 38.33%, 0.8134 40%, 0.8358 41.67%, 0.8564 43.33%, 0.8753 45%, 0.8925 46.67%, 0.9082 48.33%, 0.9223 50%, 0.9351 51.67%, 0.9465 53.33%, 0.9567 55%, 0.9658 56.67%, 0.9738 58.33%, 0.9809 60%, 0.987 61.67%, 0.9924 63.33%, 0.997 65%, 1.0009 66.67%, 1.0042 68.33%, 1.0069 70%, 1.0092 71.67%, 1.011 73.33%, 1.0124 75%, 1.0135 76.67%, 1.0143 78.33%, 1.0148 80%, 1.0151 81.67%, 1.0152 83.33%, 1.0151 85%, 1.0149 86.67%, 1.0145 88.33%, 1.0141 90%, 1.0136 91.67%, 1.013 93.33%, 1.0124 95%, 1.0118 96.67%, 1.0111 98.33%, 1 100%);
+  --spring-ms: 340ms;   /* 必须与 Swift 的 response 0.34 对齐 */
+
+  /* 内容入场曲线：比弹簧利落，用完即走（≈220ms，不是形变） */
+  --snap: cubic-bezier(0.2, 0.9, 0.25, 1);
+  --snap-ms: 220ms;
+
+  /* compact ⇄ hud 交叉淡化时长。比弹簧短得多：形变（宽/高/圆角）才是
+     主角，内容只是「换人」，140ms 内交接完，弹簧还在跑的时候新内容
+     已经站稳了。 */
+  --mode-ms: 140ms;
+
+  --r-collapsed: 12px;
+  --r-expanded: 20px;
+  /* 内发光带高度：折叠 34 / 展开 48（Mac glowBandHeight 同值） */
+  --band-collapsed: 34px;
+  --band-expanded: 48px;
+
+  /* 文字分层：白的不同不透明度，够用且不引入第二套色板 */
   --text: rgba(255, 255, 255, 0.94);
   --text-dim: rgba(255, 255, 255, 0.66);
   --text-soft: rgba(255, 255, 255, 0.52);
@@ -26,21 +80,95 @@
   --text-ghost: rgba(255, 255, 255, 0.28);
   --hairline: rgba(255, 255, 255, 0.08);
   --chip: rgba(255, 255, 255, 0.10);
-  --glow: #50505A;
   /* 详情正文块的颜色（Mac: rgb(0.65,0.84,1.0)） */
   --detail-ink: rgb(166, 214, 255);
-
-  --spring: cubic-bezier(0.22, 1.2, 0.36, 1);
-  --spring-ms: 340ms;   /* 必须与 Swift 的 response 0.34 对齐 */
-
-  --w-collapsed: 380px;
-  --w-expanded: 436px;
-  --r-collapsed: 12px;
-  --r-expanded: 20px;
-  /* 内发光带高度：折叠 34 / 展开 48（Mac glowBandHeight 同值） */
-  --band-collapsed: 34px;
-  --band-expanded: 48px;
 }
+
+/* ───────────────── 图标：CSS mask + 内联 SVG ─────────────────
+ *
+ * 为什么不用 emoji/图标字体：emoji 的字形、基线、颜色全由系统字体决定，
+ * 同一台机器上 Segoe UI Emoji 与 Mac 的 SF Symbols 完全是两种东西；
+ * 图标字体则要外链文件（零依赖红线）。用 mask 把内联 SVG 当模板，
+ * currentColor 着色，字号变了图标跟着变，且不占网络、不依赖字体。
+ * 反例：直接 <img> 内联 SVG 没法跟着文字颜色走；background-image 没法
+ * 用 currentColor 上色 —— mask 是唯一同时满足「着色 + 缩放 + 零依赖」的。
+ */
+:root {
+  --ico-agents: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='5.1' cy='4.9' r='2.7' fill='%23fff'/%3E%3Cpath d='M.8 13.5c0-2.6 1.9-4.2 4.3-4.2s4.3 1.6 4.3 4.2v.6H.8z' fill='%23fff'/%3E%3Ccircle cx='11.6' cy='5.7' r='2.1' fill='%23fff' opacity='.72'/%3E%3Cpath d='M9.9 13.5c0-2 1.3-3.3 3-3.3s3.1 1.3 3.1 3.3v.6H9.9z' fill='%23fff' opacity='.72'/%3E%3C/svg%3E");
+  --ico-sessions: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='1.5' width='10.5' height='8.5' rx='2' fill='%23fff' opacity='.5'/%3E%3Crect x='3.2' y='3.6' width='11.3' height='9.2' rx='2' fill='%23fff' opacity='.75'/%3E%3Crect x='4.4' y='5.7' width='11.3' height='9.2' rx='2' fill='%23fff'/%3E%3C/svg%3E");
+  --ico-tool: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M11.2 1.2a4.4 4.4 0 0 0-4.3 5.6L1.2 12.5l2.3 2.3 5.7-5.7a4.4 4.4 0 0 0 5.6-4.3l-2.5 2.5-2.4-.7-.7-2.4z' fill='%23fff'/%3E%3C/svg%3E");
+  --ico-todo: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.3 4.9l1.4 1.4 2.8-2.8 1.2 1.2-4 4L.1 6.1z' fill='%23fff'/%3E%3Crect x='8' y='3.7' width='7' height='1.7' rx='.85' fill='%23fff'/%3E%3Cpath d='M1.3 10.6l1.4 1.4 2.8-2.8 1.2 1.2-4 4L.1 11.8z' fill='%23fff'/%3E%3Crect x='8' y='9.4' width='7' height='1.7' rx='.85' fill='%23fff'/%3E%3C/svg%3E");
+  /* 上下文仪表：开环 + 指针（Mac 没有对应 SF Symbol，用「仪表」这个
+     通用语义；比塞一个数字图标更易读） */
+  --ico-ctx: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M13.6 8a5.6 5.6 0 1 1-2.2-4.5' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round'/%3E%3Cpath d='M8 8l3.4-3.4' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+
+.ico,
+.todo-ico {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.12em;
+  background-color: currentColor;
+  -webkit-mask-image: var(--ico);
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: contain;
+  mask-image: var(--ico);
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
+}
+
+.ico-agents { --ico: var(--ico-agents); }
+.ico-sessions { --ico: var(--ico-sessions); }
+.ico-tool { --ico: var(--ico-tool); }
+.ico-todo { --ico: var(--ico-todo); }
+
+/* 图标在胶囊/仪表里的尺寸：比文字小半号，垂直居中对齐数字 */
+.chip .ico,
+.gauge .ico {
+  width: 8.5px;
+  height: 8.5px;
+  margin-right: 3px;
+  vertical-align: -0.08em;
+  opacity: 0.9;
+}
+
+/* 折叠态胶囊/仪表的图标走 data-icon：renderer 只写属性，图标由 CSS 出。
+ * 这样渲染层不用造 <i> 节点、也不用关心图标长什么样（旧版是 emoji 字符
+ * 的人形/层叠/勾选，字形随系统字体变，两个渲染层各写一遍迟早漂移）。
+ * currentColor + mask 让琥珀/危险态的胶囊图标自动跟着文字色变，
+ * 不需要为每种状态再出一套图。 */
+#c-chip[data-icon]::before,
+#c-gauge[data-icon]::before {
+  content: "";
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 8.5px;
+  height: 8.5px;
+  margin-right: 3px;
+  vertical-align: -0.08em;
+  opacity: 0.9;
+  background-color: currentColor;
+  -webkit-mask-image: var(--ico);
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: contain;
+  mask-image: var(--ico);
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
+}
+
+#c-chip[data-icon="stack"]::before { --ico: var(--ico-sessions); }
+#c-chip[data-icon="users"]::before { --ico: var(--ico-agents); }
+#c-chip[data-icon="tool"]::before  { --ico: var(--ico-tool); }
+/* ready 是「什么都没发生」的默认胶囊，再挂一个图标只会增加噪音 */
+#c-chip[data-icon="ready"]::before { content: none; }
+#c-gauge[data-icon="ctx"]::before   { --ico: var(--ico-ctx); }
+#c-gauge[data-icon="check"]::before { --ico: var(--ico-todo); }
 
 * { box-sizing: border-box; }
 
@@ -49,7 +177,7 @@ html, body {
   padding: 0;
   background: transparent;
   overflow: hidden;
-  /* 窗口比岛大一圈（给光晕留绘制空间），岛在其中顶端居中 —— 与 Mac 的
+  /* 窗口比岛大一圈（给外发光留绘制空间），岛在其中顶端居中 —— 与 Mac 的
      ZStack(alignment:.top) + bleed 同构 */
   height: 100%;
   display: flex;
@@ -63,105 +191,282 @@ html, body {
 
 .mono { font-family: "Cascadia Mono", Consolas, "SF Mono", monospace; }
 
-/* ───────────────── 岛体 ─────────────────
+/* 显隐统一走这个类（契约 §2）：display:none 而不是 visibility/opacity ——
+   隐藏的子树不进布局也不进绘制列表，软件渲染下这是唯一真正零成本的隐藏。
+   不要用 hidden 属性：下一拍动画（entrance/spring）会被布尔属性打断。 */
+.is-off { display: none !important; }
+
+/* 需要点击/右键的容器若处于 drag 区，让 lead 给容器加 .no-drag。
+   岛体默认整块可拖（无边框窗口没有标题栏），可点小元素必须显式排除。 */
+.no-drag { -webkit-app-region: no-drag; }
+
+/* ───────────────── 岛体：尺寸 + 形状 + 外发光 ─────────────────
  *
- * 尺寸（width/height）由渲染层在换内容前后写显式值驱动弹簧；
- * 高度动画期间 overflow:hidden 裁掉半途的底部内容（收起时本来就该裁）。
- * 外发光画在 border-box 之外、窗口 bleed 之内 —— 窗口够大，不会被裁。
+ * 高度由 --island-h 驱动（renderer 写 px），宽度由 --island-w /[data-expanded]
+ * 驱动，圆角同一条弹簧 —— 三者一起动才读作「张开」而不是「长高」。
+ *
+ * 注意 .island 自身**不能** overflow:hidden：外发光伪元素要往窗口 bleed
+ * 里画。裁剪交给 .island-clip（overflow:hidden + contain: layout paint），
+ * 这样内容被圆角裁住，而光晕照旧溢出到岛外。
  */
 .island {
   position: relative;
-  width: var(--w-collapsed);
+  width: var(--island-w);
+  height: var(--island-h);
   flex: 0 0 auto;
   transform: scale(var(--scale));
   transform-origin: top center;
   background: #000;
   /* 顶平（贴屏幕顶边，方角落在屏幕边界上）+ 底圆角，对齐 NotchShape */
   border-radius: 0 0 var(--r-collapsed) var(--r-collapsed);
-  overflow: hidden;
   color: var(--text);
   user-select: none;
   cursor: default;
-  -webkit-app-region: drag;   /* 允许拖动窗口（无边框窗口没有标题栏） */
-  /* 外发光：沿剪影的一圈柔光。透明度跟着活跃状态走（见 data-live），
-     颜色跟 --glow 走 —— 状态切换时是渐变而不是硬跳 */
+  /* 只有左右 12px 的 padding 条可拖窗（见 .island-clip）；内容层是
+     no-drag 的整块可点区，不能让它被 drag 吞掉点击。 */
+  /* 拖窗改由 renderer + main 自定义实现（app-region: drag 在 Windows 上会把点击变成拖窗） */
   transition: width var(--spring-ms) var(--spring),
               height var(--spring-ms) var(--spring),
-              border-radius var(--spring-ms) var(--spring),
-              box-shadow 0.35s ease;
-  box-shadow: 0 3px 14px -2px color-mix(in srgb, var(--glow) 20%, transparent);
+              border-radius var(--spring-ms) var(--spring);
 }
 
-.island[data-live="1"] {
-  box-shadow: 0 3px 16px -1px color-mix(in srgb, var(--glow) 55%, transparent);
-}
+/* 状态色板由 renderer 写（契约 §3：不同 data-status 只改 --glow）。
+ * 取值与 Mac `ActivityStatus.glowRGB` / `windows/src/activity.js` 逐值一致：
+ *   idle #50505A · thinking #4E7CFF · tool #00D2AA · waiting #FFAA00 · done #4ADE80
+ *
+ * **CSS 这里不再定义第二份**：状态色只有一个写入方（renderer 每拍往 :root
+ * 写 inline --glow），而元素上的声明永远打得过继承值 —— 若这里按
+ * [data-status] 再写一遍，renderer 换色时会被静默覆盖，症状是「颜色怎么改
+ * 都不对」却没有任何报错。:root 的默认灰只用于「首帧快照还没到」的极短窗口。
+ */
 
 .island[data-expanded="1"] {
-  width: var(--w-expanded);
+  width: var(--island-w-expanded);
   border-radius: 0 0 var(--r-expanded) var(--r-expanded);
 }
 
-/* 内发光带：状态色从顶端往下淡出（Mac: glow.opacity(0.34) → 0）。
-   展开时更高（48px）。跟着 glowEffect 门控走 —— 它是纯装饰光。 */
-.island::before {
+/* 外发光：沿剪影的一圈柔光。**独立伪元素**是本文件最重要的一条性能取舍：
+ * v1 直接在 .island 上 transition box-shadow，软件渲染每帧重绘一圈模糊，
+ * 展开时掉帧；改成「阴影常驻、只动 opacity」后状态切换是合成器动画。
+ * opacity 过渡用 0.35s ease（不是弹簧）：光比形变慢半拍更自然，也便宜。 */
+.island::after {
   content: "";
   position: absolute;
-  left: 0; right: 0; top: 0;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 3px 14px -2px color-mix(in srgb, var(--glow) 20%, transparent);
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  pointer-events: none;
+  /* 负 z-index：光在内容之下（外发光只画在盒子外，不会盖字） */
+  z-index: -1;
+}
+
+.island[data-live="1"]::after {
+  opacity: 1;
+  box-shadow: 0 3px 16px -1px color-mix(in srgb, var(--glow) 55%, transparent);
+}
+
+/* 装饰光总开关：关掉只剩信息，不剩光。!important 是因为下面的状态动效
+   各自带 opacity/动画，这里必须是最后一道闸。 */
+.island[data-glow="0"]::after { opacity: 0 !important; }
+
+/* ───────────────── 裁剪层 + 内发光带 ───────────────── */
+
+.island-clip {
+  position: relative;
+  height: 100%;
+  /* 左右各 12px 留作**拖窗热区**：内容层（.island-body）是 no-drag 的整块
+     可点区，整岛可拖会让「点 HUD 空白 = 钉住/取消」永远收不到点击（drag 区
+     不向页面派发鼠标事件）。padding 放在裁剪层而不是 .island 上，是因为
+     .band 必须绝对定位铺满整岛（渐变要顶到屏幕边缘）；绝对定位子元素的
+     包含块是 padding box，所以左右 0 正好从 border 边开始，不受 padding 影响。 */
+  padding: 0 12px;
+  border-radius: inherit;
+  overflow: hidden;
+  /* 契约 §6.5：把展开/收起引起的重排重绘限制在岛内，不去惊动窗口里
+     其余（透明的）区域。paint 还顺带保证内容严格被圆角剪裁。 */
+  contain: layout paint;
+}
+
+/* 内发光带：状态色从顶端往下淡出（Mac: glow.opacity(0.34) → 0）。
+ * 折叠 34px / 展开 48px。折叠态宽度只有 380，34px 的渐变尾巴正好落在
+ * 信息带后面，读作「从屏幕边缘透出的光」；v1 曾让它随高度铺满整个岛，
+ * 展开时上半屏全是色，文字对比度直接崩，所以是**绝对高度**。 */
+.band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
   height: var(--band-collapsed);
   background: linear-gradient(180deg,
     color-mix(in srgb, var(--glow) 34%, transparent),
     transparent);
   opacity: 0;
   transition: height var(--spring-ms) var(--spring), opacity 0.35s ease;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.island[data-live="1"] .band { opacity: 1; }
+.island[data-expanded="1"] .band { height: var(--band-expanded); }
+.island[data-glow="0"] .band { opacity: 0 !important; }
+
+/* 工具态流光：一层更亮的 glow 色扫过内发光带。
+ * 只在 transform 上循环（3s linear），栅格化一次后走合成器；
+ * 想要「每帧改 background-position」也能做，但那是每帧重绘整条带。 */
+.band::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg,
+    transparent 30%,
+    color-mix(in srgb, var(--glow) 70%, transparent) 50%,
+    transparent 70%);
+  opacity: 0;
+  transform: translateX(-100%);
   pointer-events: none;
 }
 
-.island[data-live="1"]::before { opacity: 1; }
-.island[data-expanded="1"]::before { height: var(--band-expanded); }
-.island[data-glow="0"]::before { opacity: 0 !important; }
-.island[data-glow="0"] { box-shadow: none; }
-
-/* ───────────────── 内容通用 ───────────────── */
-
-.primary, .list, .stats, .footer, .pinned-hint {
-  transition: opacity var(--spring-ms) var(--spring),
-              transform var(--spring-ms) var(--spring);
-}
-
-/* 折叠时把非主行压掉：先淡出再收高，避免「文字还在但被裁掉」的中间态 */
-.island[data-expanded="0"] .list,
-.island[data-expanded="0"] .stats,
-.island[data-expanded="0"] .pinned-hint {
-  opacity: 0;
-  transform: translateY(-4px);
-}
-
-.island[data-expanded="1"] .list,
-.island[data-expanded="1"] .stats,
-.island[data-expanded="1"] .pinned-hint {
+.island[data-status="tool"][data-glow="1"] .band::after {
   opacity: 1;
-  transform: translateY(0);
+  animation: band-sheen 3s linear infinite;
+  will-change: transform;
 }
 
-.island { padding: 0 12px; }
-.island > .pinned-hint { padding-top: 8px; }
-.island > .primary { margin-top: 8px; }
-.island[data-expanded="0"] > .primary { margin-bottom: 8px; }
-.island > .footer { padding-bottom: 8px; }
+/* 完成态一次性微光：属性变化触发（离开发呆/回到 done），只扫一次。
+ * 用 animation 而不是 transition —— transition 要求「前后两个可插值状态」，
+ * 完成是事件不是状态，扫光从头到尾必须自己会结束。 */
+.band::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg,
+    transparent 25%,
+    color-mix(in srgb, var(--glow) 60%, white) 50%,
+    transparent 75%);
+  opacity: 0;
+  transform: translateX(-100%);
+  pointer-events: none;
+}
 
-/* ───────────────── 折叠态：刘海下的一条信息带 ─────────────────
- * 口径照 Mac compactRow：11.5pt 标题 + 6px 点 + 最多一个仪表/徽标。
- * 空间要精打细算：在干什么（左）+ 会话数/子代理/工具胶囊（右）+ 仪表 + 耗时。
+.island[data-status="done"][data-glow="1"] .band::before {
+  animation: done-glint 1.1s var(--snap) 1;
+}
+
+/* ───────────────── 内容层 ─────────────────
+ *
+ * .island-body = 自然高度度量对象 + 整块可点区：
+ *   - 无 padding：ResizeObserver 量到的 content-box 高度 == 岛高，renderer
+ *     直接写回 --island-h，不用做加减（左右 padding 在 .island-clip 上，
+ *     不影响高度）。
+ *   - flex 列：子元素 margin 不会塌陷穿透到度量高度里。
+ *   - no-drag：整个 HUD/compact（含空白处）都要能收点击（右键菜单、
+ *     点空白钉住、行/详情/设置）。这里不给 no-drag 的后果是**静默**的：
+ *     drag 区不向页面派发鼠标事件，点击全被当成拖窗口，交互看起来像坏了。
  */
+.island-body {
+  position: relative;
+  z-index: 1;          /* 压在 .band 之上（绝对定位的带否则会盖住文字） */
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  -webkit-app-region: no-drag;
+}
 
-.primary {
+/* 钉住提示：折叠/展开都在最上面一行，Mac 把这条放 hintArea，
+ * Windows 独立成一条，因为这里没有菜单栏可以借用。 */
+.pinned-hint {
+  font-size: 9.5px;
+  color: var(--text-ghost);
+  text-align: center;
+  padding-top: 8px;
+  margin-bottom: 4px;
+  -webkit-app-region: no-drag;
+}
+
+.pinned-hint:empty { display: none; }
+
+/* ───────────────── compact / hud 模式切换（交叉淡化） ─────────────────
+ *
+ * data-mode 是主驱动（契约 §2），data-expanded 是它的布尔镜像（旧断言/
+ * 旧渲染层只写这一个）。两个都认，避免只写一个时任意一侧失配。
+ *
+ * 两块都常驻 DOM，只把**非当前模式**那块「请假」：
+ *   position:absolute（脱离文档流 → 不贡献高度，ResizeObserver 量到的永远
+ *   是当前模式的高度，--island-h 不会在两块之间来回跳）+ opacity 0 +
+ *   visibility hidden。
+ * 不用 display:none 的原因：收起时 HUD 会瞬间消失、高度却还要 340ms 才弹
+ * 回去，中间露出一大块黑空洞；交叉淡化让旧内容在弹簧缩回的同时退场。
+ *
+ * visibility 的过渡分方向写，不能只写基态：
+ *   - 显示（目标 = 基态）：visibility 0s 立即生效，opacity 才开始走；
+ *   - 隐藏（目标 = 请假态）：visibility 0s 140ms，等淡出结束再真藏起来，
+ *     否则元素在 opacity 动画开始前就不可见了。
+ * transition 取的是**目标态**的声明，所以两边各写一份。
+ */
+.compact {
   display: flex;
   align-items: center;
   gap: 7px;
   height: 28px;
-  -webkit-app-region: no-drag;
+  margin: 8px 0;
   cursor: pointer;
+  transition: opacity var(--mode-ms) ease, visibility 0s;
 }
+
+.hud {
+  display: flex;
+  flex-direction: column;
+  padding: 0 0 9px;
+  transition: opacity var(--mode-ms) ease, visibility 0s;
+}
+
+/* 请假态。高度的度量交给「当前模式」那块：请假块高度 auto，淡出期间内容
+   保持自然排布、随岛体弹簧一起被 .island-clip 裁，而不是被 inset:0 压扁。 */
+.island:not(:is([data-mode="hud"], [data-expanded="1"])) #hud,
+.island:is([data-mode="hud"], [data-expanded="1"]) #compact {
+  position: absolute;
+  inset: 0 0 auto;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity var(--mode-ms) ease, visibility 0s var(--mode-ms);
+}
+
+/* ───────────────── 分层入场（契约 §6.3） ─────────────────
+ *
+ * 展开时按信息层级依次浮现：hdr(0) → pressure(20) → detail(50) →
+ * todo(80) → list(110) → stats(140) → footer(170)。每层 opacity 0→1 +
+ * translateY(3px→0)，220ms。
+ *
+ * 为什么是 animation 而不是 transition：入场是「模式进入」这个事件，不是
+ * 属性前后两态 —— 用 transition 得给每层准备一个隐藏旧值，而交叉淡化期间
+ * 旧模式还在淡出，两套过渡会互相干扰。animation 的触发条件是
+ * animation-name 变化：离开 hud 模式时选择器不再匹配（name 回到 none），
+ * 再进入时 none → layer-in，动画自然重放；fill-mode: both 让 delay 期间
+ * 保持 from 状态（否则会先闪一帧再淡入）。
+ *
+ * 收起时全部 0 延迟：退场由上面的 140ms 交叉淡化 + 岛体高度弹簧负责，
+ * 内容层不再错峰 —— 给退场加延迟只会让「收」看起来拖泥带水。
+ */
+.island:is([data-mode="hud"], [data-expanded="1"]) .hud > * {
+  animation: layer-in var(--snap-ms) var(--snap) both;
+}
+
+.island:is([data-mode="hud"], [data-expanded="1"]) .hud > .hdr      { animation-delay: 0ms; }
+.island:is([data-mode="hud"], [data-expanded="1"]) .hud > .pressure { animation-delay: 20ms; }
+.island:is([data-mode="hud"], [data-expanded="1"]) .hud > .detail   { animation-delay: 50ms; }
+.island:is([data-mode="hud"], [data-expanded="1"]) .hud > .todo     { animation-delay: 80ms; }
+.island:is([data-mode="hud"], [data-expanded="1"]) .hud > .list     { animation-delay: 110ms; }
+.island:is([data-mode="hud"], [data-expanded="1"]) .hud > .stats    { animation-delay: 140ms; }
+.island:is([data-mode="hud"], [data-expanded="1"]) .hud > .footer   { animation-delay: 170ms; }
+
+/* ───────────────── 折叠态：屏幕顶端的一条信息带 ─────────────────
+ * 口径照 Mac compactRow：11.5pt 标题 + 6px 点 + 最多一个仪表/徽标。
+ * 空间要精打细算：在干什么（左）+ 会话数/子代理/工具胶囊（右）+ 仪表 + 耗时。
+ */
 
 .dot {
   width: 6px;
@@ -169,9 +474,11 @@ html, body {
   border-radius: 50%;
   background: var(--dot, var(--glow));
   flex: 0 0 auto;
-  /* 点自带一圈同色微光（Mac: .shadow(glow.opacity(0.9), radius: 4)） */
+  /* 点自带一圈同色微光（Mac: .shadow(glow.opacity(0.9), radius: 4)）。
+     这是状态可见性的一部分，不计入 glowEffect 的「装饰光」门控。 */
   box-shadow: 0 0 5px 1px var(--dot, var(--glow));
-  transition: background-color .3s ease, box-shadow .3s ease;
+  /* 只过渡颜色：box-shadow 过渡在软件渲染下是每帧重绘模糊（契约 §6.2 禁令） */
+  transition: background-color 0.3s ease;
 }
 
 .title {
@@ -188,31 +495,69 @@ html, body {
 /* 胶囊徽标（Mac Capsule 白 10%~14% 底），等宽小字 */
 .chip {
   font-size: 9.5px;
+  line-height: 1.35;
   color: var(--chip-ink, rgba(255, 255, 255, 0.72));
   background: var(--chip);
   border-radius: 999px;
   padding: 1.5px 6px;
   flex: 0 0 auto;
   white-space: nowrap;
-  transition: background-color .25s ease, color .25s ease;
+  display: inline-flex;
+  align-items: center;
+  transition: background-color 0.25s ease, color 0.25s ease;
 }
 
 /* 折叠态的状态仪表（上下文 / 耗时）—— 等宽、灰阶分层 */
 .gauge {
   font-size: 9.5px;
+  line-height: 1.35;
   color: var(--text-soft);
   flex: 0 0 auto;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
 }
 
-.gauge.warn  { color: rgba(240, 158, 38, 1); }
-.gauge.danger{ color: rgba(227, 74, 74, 1); }
+/* 上下文告警色：与 Mac contextColor 同值（过半琥珀 / 超 80% 红） */
+.gauge.warn   { color: rgba(240, 158, 38, 1); }
+.gauge.danger { color: rgba(227, 74, 74, 1); }
 
-/* ───────────────── 展开 HUD：头部 ─────────────────
- * Mac headerRow：状态角标（发光色芯片）+ 标题 + 轮次 + 右侧提示区，
- * 底下一条发丝线。
+/* 折叠态耗时和上下文共用仪表位；显式声明等宽数字，别指望继承 ——
+   这个节点由渲染层按状态重建内容，继承链上任何一处字体回退都会让它抖。 */
+.gauge.elapsed { font-variant-numeric: tabular-nums; }
+
+/* ───────────────── 状态动效（契约 §6.4） ─────────────────
+ *
+ * 只动状态点（六像素的东西，怎么动都便宜）和内发光带的廉价层。
+ * 全部要求 data-glow="1"：glowEffect 关掉时连动效一起退场，
+ * 而不是「没光了但还在闪」。
  */
+.island[data-status="thinking"][data-glow="1"] :is(#c-dot, #h-dot) {
+  animation: dot-breathe 2.4s ease-in-out infinite;
+  will-change: transform, opacity;
+}
 
+.island[data-status="tool"][data-glow="1"] :is(#c-dot, #h-dot) {
+  animation: dot-tool 1.6s ease-in-out infinite;
+  will-change: transform;
+}
+
+.island[data-status="waiting"][data-glow="1"] :is(#c-dot, #h-dot) {
+  animation: dot-heartbeat 1.2s ease-in-out infinite;
+  will-change: transform;
+}
+
+/* 等待确认的外发光脉冲：琥珀色心跳。opacity 0.55→0.9 是 Mac 那一档
+ * 的强度，再高会像报警灯、抢走「需要人」的语义。 */
+.island[data-status="waiting"][data-glow="1"]::after {
+  animation: glow-pulse 1.2s ease-in-out infinite;
+  will-change: opacity;
+}
+
+/* ───────────────── 展开 HUD ───────────────── */
+
+/* 头部：状态点 + 状态角标芯片 + 标题 + 轮次 + 右侧提示区，
+ * 底下一条发丝线（Mac: white 0.08, 0.5px）。 */
 .hdr {
   display: flex;
   align-items: center;
@@ -223,11 +568,12 @@ html, body {
   flex: 0 0 auto;
 }
 
-/* 发丝分隔线（Mac: white 0.08, 0.5px） */
 .hdr::after {
   content: "";
   position: absolute;
-  left: 2px; right: 2px; bottom: -4px;
+  left: 2px;
+  right: 2px;
+  bottom: -4px;
   height: 1px;
   background: var(--hairline);
 }
@@ -235,6 +581,7 @@ html, body {
 .badge {
   font-size: 9.5px;
   font-weight: 600;
+  line-height: 1.35;
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--glow);
@@ -243,10 +590,10 @@ html, body {
   padding: 2px 6px;
   flex: 0 0 auto;
   white-space: nowrap;
-  transition: color .3s ease, background-color .3s ease;
+  transition: color 0.3s ease, background-color 0.3s ease;
 }
 
-.hdr .h-title {
+.h-title {
   font-size: 12px;
   font-weight: 500;
   color: var(--text-dim);
@@ -257,7 +604,12 @@ html, body {
   min-width: 0;
 }
 
-.hdr .h-step { font-size: 9.5px; color: var(--text-soft); flex: 0 0 auto; }
+.h-step {
+  font-size: 9.5px;
+  color: var(--text-soft);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 
 /* 头部右侧提示区。优先级照 Mac hintArea：跳转反馈 > 钉住 > 默认提示 */
 .hint {
@@ -267,30 +619,94 @@ html, body {
   white-space: nowrap;
 }
 
-.hint.ok    { color: rgb(140, 235, 184); }
-.hint.pin   { color: color-mix(in srgb, var(--glow) 90%, transparent); }
+.hint.ok  { color: rgb(140, 235, 184); }
+.hint.pin { color: color-mix(in srgb, var(--glow) 90%, transparent); }
+
+/* ───────────────── 上下文压力条（契约 §6.7） ─────────────────
+ *
+ * 2px 高，颜色从 --glow 走到琥珀/红。门槛判定在 renderer（它知道
+ * fraction），这里只认 data-level=0/1/2 —— CSS 没法拿数值做比较。
+ * renderer 侧约定：#pressure.dataset.level，以及 #pressure-fill 的
+ * --ctx（百分比，如 "46%"）或直接 inline width。两者都支持：
+ * inline width 优先级更高，--ctx 是给「只写变量」路径留的口子。
+ */
+.pressure {
+  position: relative;
+  height: 2px;
+  margin: 5px 2px 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.pressure-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--ctx, 0%);
+  border-radius: inherit;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--glow) 55%, transparent),
+    var(--glow));
+  transition: width 260ms var(--snap);
+}
+
+/* >50%：琥珀。>80%：红。用 data-level 而不是 :has(> .fill[style*="..."])，
+ * 后者在每次宽度变化时都要重新匹配，等于给热路径加了一笔。 */
+.pressure[data-level="1"] .pressure-fill {
+  background: linear-gradient(90deg,
+    color-mix(in srgb, rgb(240, 158, 38) 45%, transparent),
+    rgb(240, 158, 38));
+}
+
+.pressure[data-level="2"] .pressure-fill {
+  background: linear-gradient(90deg,
+    color-mix(in srgb, rgb(227, 74, 74) 45%, transparent),
+    rgb(227, 74, 74));
+}
 
 /* ───────────────── 详情正文块（单会话） ─────────────────
  * Mac：mono 11pt 淡蓝，白 7% 圆角底；点它 = 跳到该会话。
+ *
+ * 结构上拆成两层（外层 .detail = 外框 / 内层 .detail-text = 文本截断），
+ * 不是多此一举：单层 `display:-webkit-box + -webkit-line-clamp + padding`
+ * 在 Chromium 152 下会漏 —— overflow 的裁剪边是 padding-box，而 clamp 只
+ * 把**内容框**压到 N 行，于是第 N+1 行的顶部几个像素会画进底部 padding 区，
+ * 底边露出一条被切掉一半的字。外层 padding + 内层 clamp 则完全干净
+ * （lead 已用三组对照实测：单层漏 / display:block 不截断 / 两层干净）。
+ * 所以：clamp 相关声明只许待在内层，内层也不许加 padding。
  */
-
 .detail {
   margin: 7px 2px 0;
   padding: 6px 8px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.07);
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--detail-ink);
+  overflow: hidden;
+  /* -webkit-line-clamp / -webkit-box-orient 一律不写在这一层（见上面的漏字说明） */
+  flex: 0 0 auto;
+  -webkit-app-region: no-drag;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.detail-text {
   display: -webkit-box;
+  /* 3 行封顶；有 todo 行时收成 2 行（Mac 的 lineLimit 随 hasTodo 变），
+     否则展开态高度会被正文吃掉、待办和统计被挤到窗口外。 */
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
   word-break: break-all;
-  -webkit-app-region: no-drag;
-  cursor: pointer;
-  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--detail-ink);
 }
+
+.island:has(#todo:not(.is-off)) .detail-text { -webkit-line-clamp: 2; }
+
+.detail:hover { background: rgba(255, 255, 255, 0.10); }
 
 /* ───────────────── 待办行 ───────────────── */
 
@@ -304,6 +720,15 @@ html, body {
   flex: 0 0 auto;
 }
 
+.todo:empty { display: none; }
+
+.todo-ico {
+  --ico: var(--ico-todo);
+  width: 10px;
+  height: 10px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
 .todo .cur {
   flex: 1 1 auto;
   min-width: 0;
@@ -312,19 +737,24 @@ html, body {
   text-overflow: ellipsis;
 }
 
-.todo .prog { font-size: 10px; color: var(--text); flex: 0 0 auto; }
+.todo .prog {
+  font-size: 10px;
+  color: var(--text);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 
 /* ───────────────── 会话行（多会话列表） ─────────────────
  * 口径照 Mac sessionRow：6px 点 / 10.5px 名字（主会话 semibold，定宽对齐）/
  * 10px 当前动作 / mono 9px 短标签胶囊 / mono 9.5px 耗时；
  * 主会话行白 9% 高亮，点行 = 跳转。
  */
-
 .list {
   margin-top: 6px;
   display: flex;
   flex-direction: column;
   gap: 3px;
+  flex: 0 0 auto;
 }
 
 .list:empty { display: none; }
@@ -338,11 +768,34 @@ html, body {
   border-radius: 5px;
   -webkit-app-region: no-drag;
   cursor: pointer;
-  transition: background-color .15s ease;
+  /* 悬停只改背景色：一行 22px 的填充，软件渲染下也无感。
+     过渡只列 background-color —— 别用 all，会把 outline 也带上。 */
+  transition: background-color 0.15s ease;
 }
 
 .row.primary-row { background: rgba(255, 255, 255, 0.09); }
 .row:hover { background: rgba(255, 255, 255, 0.13); }
+
+/* 行内状态点颜色：renderer 按行写 inline --dot（每个会话自己的状态色）；
+ * data-status 这份是「只写属性」路径的兜底，值与 Mac glowRGB 一致。
+ * 不要用 nth-child 之类去猜状态 —— 行会增删，猜出来的颜色迟早错位。 */
+.row[data-status="idle"]     { --dot: #50505A; }
+.row[data-status="thinking"] { --dot: #4E7CFF; }
+.row[data-status="tool"]     { --dot: #00D2AA; }
+.row[data-status="waiting"]  { --dot: #FFAA00; }
+.row[data-status="done"]     { --dot: #4ADE80; }
+
+/* 键盘焦点行：仅键盘（renderer 按 ↑/↓ 加 .focused，或 :focus-visible），
+ * 鼠标点击不出现焦点环 —— 鼠标已经有 hover 反馈了。 */
+.row.focused,
+.row:focus-visible,
+.link:focus-visible,
+[data-act]:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--glow) 70%, transparent);
+  outline-offset: -1px;
+}
+
+.row.focused { background: rgba(255, 255, 255, 0.10); }
 
 .row .label {
   font-size: 10.5px;
@@ -372,6 +825,7 @@ html, body {
 
 .row .tag {
   font-size: 9px;
+  line-height: 1.35;
   color: rgba(255, 255, 255, 0.5);
   background: rgba(255, 255, 255, 0.06);
   border-radius: 999px;
@@ -393,9 +847,8 @@ html, body {
 
 /* ───────────────── 统计行 ─────────────────
  * Mac statsRow：「标签: 值」成对，标签 40% 白、值等宽 85% 白，
- * 顶部一条发丝线。
+ * 顶部一条发丝线。整行可点 = 跳主会话（多会话时目标明确）。
  */
-
 .stats {
   margin-top: 8px;
   padding-top: 7px;
@@ -422,10 +875,11 @@ html, body {
 .stat.warn b { color: rgba(240, 158, 38, 1); }
 .stat.danger b { color: rgba(227, 74, 74, 1); }
 
+.stats:hover .stat b { color: rgba(255, 255, 255, 0.95); }
+
 /* ───────────────── 末行：桥状态 / 跳转反馈 / 设置 ─────────────────
  * Windows 特有（Mac 把这些放菜单栏），样式对齐 Mac metaRow：9pt 灰阶。
  */
-
 .footer {
   margin-top: 7px;
   display: flex;
@@ -439,10 +893,23 @@ html, body {
 
 .footer:empty { display: none; }
 
-.footer .jump { color: rgb(140, 235, 184); }
+.footer .foot-left {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+#bridge-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.footer .jump { color: rgb(140, 235, 184); white-space: nowrap; }
 .footer .jump.failed { color: rgb(227, 74, 74); }
 
-.footer .foot-left { display: inline-flex; align-items: center; white-space: nowrap; }
 .footer .link {
   color: rgba(255, 255, 255, 0.42);
   cursor: pointer;
@@ -450,9 +917,10 @@ html, body {
   border-radius: 4px;
   /* 岛整体是拖拽区，可点元素必须显式排除，否则点下去变成拖窗口 */
   -webkit-app-region: no-drag;
-  transition: color .12s ease, background-color .12s ease;
+  transition: color 0.12s ease, background-color 0.12s ease;
 }
-.footer .link:hover { color: var(--text); background: rgba(255,255,255,.08); }
+
+.footer .link:hover { color: var(--text); background: rgba(255, 255, 255, 0.08); }
 
 .bridge-dot {
   display: inline-block;
@@ -461,7 +929,7 @@ html, body {
   border-radius: 50%;
   margin-right: 4px;
   background: rgba(255, 255, 255, 0.3);
-  transition: background-color .25s ease;
+  transition: background-color 0.25s ease;
 }
 
 .bridge-dot.on { background: rgb(74, 222, 128); }
@@ -471,17 +939,6 @@ html, body {
    这是「用户点了岛但 DSH 没切过去」唯一的可视线索。 */
 .pending { color: #FFAA00; }
 
-/* ───────────────── 钉住提示 ───────────────── */
-
-.pinned-hint {
-  font-size: 9.5px;
-  color: var(--text-ghost);
-  text-align: center;
-  margin-bottom: 4px;
-}
-
-.pinned-hint:empty { display: none; }
-
 /* 空态：一个会话都没有时给个说得清的提示，而不是空白 */
 .empty {
   font-size: 11.5px;
@@ -490,11 +947,72 @@ html, body {
   padding: 4px 0;
 }
 
-/* 系统「减少动态效果」：形变瞬时完成。颜色都在（颜色不是动效），信息不丢。 */
+/* ───────────────── keyframes ─────────────────
+ *
+ * 全部只碰 transform / opacity：软件渲染下这两样是合成器能接手的；
+ * 碰 width/left/top 就是每帧强制布局 + 重绘，循环动画尤其要命。
+ */
+@keyframes layer-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* 思考：2.4s 呼吸，scale 1→1.25、透明度微降（契约 §6.4 的定值） */
+@keyframes dot-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.92; }
+  50%      { transform: scale(1.25); opacity: 0.72; }
+}
+
+/* 工具：1.6s 弹性呼吸（带回弹，像被工具调用一下下顶着） */
+@keyframes dot-tool {
+  0%, 100% { transform: scale(1); }
+  30%      { transform: scale(1.22); }
+  55%      { transform: scale(0.96); }
+  75%      { transform: scale(1.06); }
+}
+
+/* 等待确认：1.2s 琥珀心跳（双峰，像脉搏） */
+@keyframes dot-heartbeat {
+  0%, 100% { transform: scale(1); }
+  12%      { transform: scale(1.35); }
+  24%      { transform: scale(1); }
+  36%      { transform: scale(1.22); }
+  48%      { transform: scale(1); }
+}
+
+/* 外发光脉冲：opacity 0.55 ↔ 0.9（契约 §6.4 的定值） */
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 0.9; }
+}
+
+/* 工具流光：3s 线性循环，扫光从带子左侧走到右侧 */
+@keyframes band-sheen {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}
+
+/* 完成微光：一次性扫过，靠属性变化触发，不做状态（见 .band::before） */
+@keyframes done-glint {
+  0%   { opacity: 0; transform: translateX(-100%); }
+  25%  { opacity: 0.85; }
+  100% { opacity: 0; transform: translateX(100%); }
+}
+
+/* ───────────────── 无障碍：系统「减少动态效果」 ─────────────────
+ *
+ * 全关，不是「缩短」。只把 duration 调到 0.01ms 会留下动画的终止帧
+ * （例如脉冲停在 opacity 0.9、扫光停在一半），看起来像卡住；animation:none
+ * 让元素回到静态基态（内容全可见、光层按 data-live 常亮）。
+ * 形变本身（宽高圆角）靠 transition-duration 近似瞬时，颜色不是动效、
+ * 信息一条不丢。
+ */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
   }
 }

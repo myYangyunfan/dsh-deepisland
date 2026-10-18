@@ -17,6 +17,7 @@ const SUITES = [
   'monitor.test.js',
   'bridge.test.js',
   'jump.test.js',
+  'snapshot.test.js',
   'setup-entry.test.js',
 ];
 

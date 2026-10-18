@@ -7,12 +7,14 @@
   "scripts": {
     "start": "node scripts/dev.js",
     "test": "node test/run.js",
+    "perf": "node scripts/perf.js",
     "shots": "node scripts/shots.js",
     "icons": "node scripts/make-icons.js",
     "electron:install": "install-electron",
     "dist": "electron-builder --win --x64",
     "dist:dir": "electron-builder --win --x64 --dir",
-    "sums": "node scripts/make-sums.js"
+    "sums": "node scripts/make-sums.js",
+    "asar": "node scripts/make-asar.js"
   },
   "devDependencies": {
     "electron": "^44.0.0",

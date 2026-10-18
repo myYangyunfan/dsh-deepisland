@@ -273,9 +273,18 @@ function decorate(entry, now) {
   e.glow = (STATUS_META[a.status] || STATUS_META.idle).glow;
   e.badge = (STATUS_META[a.status] || STATUS_META.idle).badge;
   e.elapsedText = a.turnStartTime ? act.formatDuration(now - a.turnStartTime) : null;
+  // epoch 起点：renderer 用它自己按秒走字（比每拍算好的字符串准半拍，
+  // 也让「同一秒内重渲染」不再产生新快照）。
+  e.elapsedFrom = a.turnStartTime || null;
   e.toolCountText = a.toolCount + ' 次';
   e.contextText = p ? formatPercent(projections.contextFraction(p)) : null;
+  // 压力条的原始比例：文本（"42%"）不够画进度条，renderer 需要 0..1。
+  e.contextFraction = p ? projections.contextFraction(p) : null;
   e.contextLevel = p ? contextLevel(p) : 0;
+  // 待办拆成 done/total：HUD 的进度条与紧凑态文本用的是同一组数。
+  e.todoDone = (p && Number.isFinite(p.todoDone)) ? p.todoDone : 0;
+  e.todoTotal = (p && Number.isFinite(p.todoTotal)) ? p.todoTotal : 0;
+  e.pendingTools = Number.isFinite(a.pendingTools) ? a.pendingTools : 0;
   e.todoText = (p && p.todoTotal > 0) ? (p.todoDone + '/' + p.todoTotal) : null;
   e.turnStepText = turnStepText(a);
   e.outputText = (p && typeof p.outputTokens === 'number')

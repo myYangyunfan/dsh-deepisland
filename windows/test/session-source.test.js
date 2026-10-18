@@ -52,7 +52,11 @@ if (files.length === 0) {
   const f = files[0];
   check('能找到会话文件', true, '找到 ' + files.length + ' 个');
   check('有 id（= 会话目录名）', typeof f.id === 'string' && f.id.length > 0, f.id);
-  check('id 形如 session-<uuid>', /^session-[0-9a-f-]+$/.test(f.id), f.id);
+  // 真实数据里会话目录名有两种：`session-<uuid>` 和裸 `<uuid>`（与投影文件的
+  // 两种命名同源，README 已记录）。断言只钉「是个合法 uuid 形态」，不钉前缀 ——
+  // 钉死前缀会在本机有裸 uuid 会话时误报（2026-10-18 实测到 ddedf682-...）。
+  check('id 形如 session-<uuid> 或裸 <uuid>',
+    /^(session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(f.id), f.id);
   check('有 project 名', typeof f.project === 'string' && f.project.length > 0, f.project);
   check('文件路径指向 .zstd', f.file.endsWith('session.v4.jsonl.zstd'), f.file);
   check('文件真实存在', fs.existsSync(f.file), f.file);

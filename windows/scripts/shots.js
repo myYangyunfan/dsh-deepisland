@@ -15,7 +15,15 @@
  * - `DSH_NOTCH_SMOKE=1`（main.js 内建）：验**真实数据**下岛能渲染，
  *   截的是当前会话的真实状态 —— 给 CI 用，状态不可控。
  * - 本脚本：状态**可控**，给 README 用。合成快照的字段口径与
- *   `monitor.js` 的 `decorate()` 逐一对应，改字段要同步改两边。
+ *   `src/snapshot.js` 的 `buildSnapshot()` 逐一对应（v2 DTO），改字段要同步改两边。
+ *
+ * ## 窗口为什么要 showInactive + opacity 0.02（踩坑记录，勿改）
+ *
+ * v2 的形变/高度依赖 CSS 过渡，而隐藏窗口（`show:false`）在 Windows 上
+ * 会在约 1 秒后把 rAF 节流到 1Hz —— 弹簧和分层入场都不再推进，
+ * `capturePage` 截到的是「上一场景的最后画面」，六张图会整体错位一帧。
+ * 所以先 `setOpacity(0.02)` 再 `showInactive()`：窗口真的显示（合成器出帧）
+ * 但基本透明、不抢焦点。实测之后 rAF 稳定 144Hz（与 perf.js 同一套做法）。
  *
  * ## 高清放大的正确姿势（踩坑记录，勿改）
  *
@@ -66,95 +74,140 @@ const MARGIN = 20;
 const SRC = path.join(__dirname, '..', 'src');
 const OUT = path.resolve(__dirname, '..', '..', 'docs', 'screenshots');
 
-// ───────────────────────── 合成快照（口径对齐 monitor.js decorate） ─────────────────────────
+// ───────────────────────── 合成快照（口径对齐 snapshot.js buildSnapshot） ─────────────────────────
 
+/** v2 config DTO：只有契约 §4 这 6 项，不再有 raw/fileExists。 */
 function cfg() {
   return {
+    scale: 1,             // 必须是 1：CSS transform 放大在 capturePage 里会被丢弃
+    glowEffect: true,
+    expandOnHover: true,
     notchEnabled: true,
-    jumpEnabled: true,
     idleHide: true,
-    // 必须是 1：CSS transform 放大在 capturePage 里会被丢弃（见文件头踩坑记录）
-    scale: 1,
-    fileExists: true,
-    raw: {},
+    jumpEnabled: true,
   };
 }
 
+/** 上下文等级口径与 monitor.js / renderer.js 一致：>0.8 红，>0.5 琥珀。 */
+function ctxLevel(frac) {
+  return frac > 0.8 ? 2 : frac > 0.5 ? 1 : 0;
+}
+
+/**
+ * 合成 entry：v2 DTO 白名单字段（见 src/snapshot.js 的 ENTRY_FIELDS）。
+ * 刻意保留 `elapsedText`：契约 §4 允许它存在，旧读法（含 shots 的文档）兼容。
+ */
 function entry(o) {
-  return {
+  const now = Date.now();
+  const elapsedMs = o.elapsedMs || 0;
+  const frac = typeof o.contextFraction === 'number' ? o.contextFraction : null;
+  const live = !!o.status && o.status !== 'idle';
+  const e = {
     id: o.id || 'session-a1b2c3d4',
-    file: '',
-    project: '',
-    mtimeMs: Date.now(),
     label: o.label,
-    activity: {},
-    tag: o.tag,
+    shortId: (o.id || 'session-a1b2c3d4').replace(/^session-/, '').slice(0, 8),
     status: o.status,
+    live,
     glow: o.glow,
+    tag: o.tag,
     badge: o.badge || o.tag,
-    elapsedText: o.elapsedText || null,
-    toolCountText: o.toolCountText || null,
-    contextText: o.contextText || null,
-    contextLevel: o.contextLevel || 0,
-    todoText: o.todoText || null,
     turnStepText: o.turnStepText || null,
+    toolCountText: o.toolCountText || null,
     outputText: o.outputText || null,
+    contextText: o.contextText || null,
+    contextFraction: frac,
+    contextLevel: frac === null ? 0 : ctxLevel(frac),
+    todoText: o.todoText || null,
+    todoDone: o.todoDone === undefined ? null : o.todoDone,
+    todoTotal: o.todoTotal === undefined ? null : o.todoTotal,
+    todoCurrent: o.todoCurrent || null,
     subagentText: o.subagentText || null,
-    shortId: 'a1b2c3d4',
+    pendingTools: o.pendingTools || 0,
     detailText: o.detailText || null,
     actionText: o.actionText || null,
-    todoCurrent: o.todoCurrent || null,
   };
+  // 只有「有回合起点」的会话才带 elapsedFrom/elapsedText；done 条目在真实数据里
+  // turnStartTime=null（inferFromProjection 新建 activity），UI 显示 `--:--`。
+  // 这里若给 done 补一个 now，截图会显示 00:00，与真机不一致。
+  if (elapsedMs > 0) {
+    e.elapsedFrom = now - elapsedMs;
+    e.elapsedText = o.elapsedText || null;
+  }
+  // v2 渲染层按「缺省 = 空/0」读，null/0 的字段不出现在真实 DTO 里。
+  // 这里保持同一口径，截图才与线上形状一致。
+  for (const k of Object.keys(e)) {
+    if (e[k] === null || e[k] === undefined || e[k] === '') delete e[k];
+  }
+  // pendingTools=0 在真实 DTO 里省略（见 snapshot.js 的 ENTRY_ALWAYS 注释）
+  if (e.pendingTools === 0) delete e.pendingTools;
+  return e;
 }
 
-const snap = (entries) => ({
-  now: Date.now(),
-  entries,
-  config: cfg(),
-  bridge: { ok: true, port: 47311, plugin: 'dsh-vibe-island', pending: 0 },
-  jump: null,
-});
+/** 组装 v2 快照：{v, rev, entries, config, bridge, jump, serverNow}。 */
+function snap(name, entries) {
+  const content = {
+    v: 2,
+    entries,
+    config: cfg(),
+    bridge: { ok: true, port: 47311, pending: 0 },
+    jump: null,
+  };
+  return {
+    v: 2,
+    // 渲染层按 rev 去重；每个场景的内容不同，rev 必须不同（真实主进程也是这么算的）。
+    rev: 'shots-' + name,
+    entries: content.entries,
+    config: content.config,
+    bridge: content.bridge,
+    jump: content.jump,
+    serverNow: Date.now(),
+  };
+}
 
 /** 六个场景：三个折叠态 + 三个展开态（HUD）。hover=true 用合成 mousemove 触发悬停展开。 */
 const SCENES = [
   {
     name: 'compact-thinking',
     title: '折叠态 · 深度思考中',
-    snap: snap([entry({
+    snap: () => snap('compact-thinking', [entry({
       label: 'AlexNet 架构可视化',
       status: 'thinking', tag: 'Thinking', glow: '#4E7CFF',
       actionText: '深度思考中...',
       detailText: '正在分析三通道卷积层的参数量与感受野...',
-      elapsedText: '00:42', turnStepText: 'T3·S7',
-      toolCountText: '2 次', outputText: '12.4k tok', contextText: '32%',
+      elapsedMs: 42_000, elapsedText: '00:42', turnStepText: 'T3·S7',
+      toolCountText: '2 次', outputText: '12.4k tok',
+      contextText: '32%', contextFraction: 0.32,
     })]),
   },
   {
     name: 'compact-tool',
     title: '折叠态 · 执行工具',
-    snap: snap([entry({
+    snap: () => snap('compact-tool', [entry({
       label: 'Music Region 地图模块',
       status: 'tool', tag: 'Executing Tool', glow: '#00D2AA',
       actionText: '执行 edit',
       detailText: 'src/map/TileSource.kt',
-      elapsedText: '00:08', turnStepText: 'T1·S2',
-      toolCountText: '1 次', outputText: '3.1k tok', contextText: '18%',
+      elapsedMs: 8000, elapsedText: '00:08', turnStepText: 'T1·S2',
+      toolCountText: '1 次', outputText: '3.1k tok',
+      contextText: '18%', contextFraction: 0.18, pendingTools: 1,
     })]),
   },
   {
     name: 'compact-multi',
     title: '折叠态 · 多会话并行',
-    snap: snap([
+    snap: () => snap('compact-multi', [
       entry({
         id: 'session-aaaa1111', label: 'AlexNet 架构可视化',
         status: 'thinking', tag: 'Thinking', glow: '#4E7CFF',
-        actionText: '深度思考中...', elapsedText: '00:42', turnStepText: 'T3·S7',
+        actionText: '深度思考中...', elapsedMs: 42_000, elapsedText: '00:42', turnStepText: 'T3·S7',
+        contextText: '32%', contextFraction: 0.32,
       }),
       entry({
         id: 'session-bbbb2222', label: 'Music Region 地图模块',
         status: 'tool', tag: 'Executing Tool', glow: '#00D2AA',
         actionText: '执行 edit', detailText: 'src/map/TileSource.kt',
-        elapsedText: '00:08', turnStepText: 'T1·S2',
+        elapsedMs: 8000, elapsedText: '00:08', turnStepText: 'T1·S2',
+        contextText: '18%', contextFraction: 0.18, pendingTools: 1,
       }),
       entry({
         id: 'session-cccc3333', label: '盐碱地决策系统',
@@ -167,53 +220,58 @@ const SCENES = [
     name: 'hud-thinking',
     title: '展开态 · 单会话 HUD（悬停展开）',
     hover: true,
-    snap: snap([entry({
+    snap: () => snap('hud-thinking', [entry({
       label: 'AlexNet 架构可视化',
       status: 'thinking', tag: 'Thinking', glow: '#4E7CFF',
       actionText: '深度思考中...',
       detailText: '先按 224×224 输入反推各层特征图尺寸，再核对原论文参数量：conv1 是 11×11×3×96，stride 4，这一层就占了三成以上参数，可视化时要把这一层的权重热图画出来。',
-      elapsedText: '00:42', turnStepText: 'T3·S7',
-      toolCountText: '2 次', outputText: '12.4k tok', contextText: '32%',
-      todoText: '2/5', todoCurrent: '补齐训练曲线渲染',
+      elapsedMs: 42_000, elapsedText: '00:42', turnStepText: 'T3·S7',
+      toolCountText: '2 次', outputText: '12.4k tok',
+      contextText: '32%', contextFraction: 0.32,
+      todoText: '2/5', todoDone: 2, todoTotal: 5, todoCurrent: '补齐训练曲线渲染',
     })]),
   },
   {
     name: 'hud-tool',
     title: '展开态 · 工具执行中（悬停展开）',
     hover: true,
-    snap: snap([entry({
+    snap: () => snap('hud-tool', [entry({
       label: 'Music Region 地图模块',
       status: 'tool', tag: 'Executing Tool', glow: '#00D2AA',
       actionText: '执行 run_code',
       detailText: 'const layers = await tools.glob({ pattern: "src/map/**/*.kt" }); console.log(layers);',
-      elapsedText: '00:08', turnStepText: 'T1·S2',
-      toolCountText: '1 次', outputText: '3.1k tok', contextText: '18%',
-      todoText: '1/3', todoCurrent: '天地图瓦片源切换',
+      elapsedMs: 8000, elapsedText: '00:08', turnStepText: 'T1·S2',
+      toolCountText: '1 次', outputText: '3.1k tok',
+      contextText: '18%', contextFraction: 0.18, pendingTools: 1,
+      todoText: '1/3', todoDone: 1, todoTotal: 3, todoCurrent: '天地图瓦片源切换',
     })]),
   },
   {
     // 等待确认会自动展开（renderer.js shouldExpand）—— 不用合成悬停
     name: 'hud-multi',
     title: '展开态 · 多会话列表（等待确认自动展开）',
-    snap: snap([
+    snap: () => snap('hud-multi', [
       entry({
         id: 'session-cccc3333', label: '盐碱地决策系统',
         status: 'waiting', tag: 'Action Required', glow: '#FFAA00',
         actionText: '等待人工确认',
         detailText: '提问: 是否用新一批采样数据覆盖现有施肥模型？',
-        elapsedText: '00:03', turnStepText: 'T2·S4',
+        elapsedMs: 3000, elapsedText: '00:03', turnStepText: 'T2·S4',
         toolCountText: '1 次',
+        contextText: '61%', contextFraction: 0.61, pendingTools: 1,
       }),
       entry({
         id: 'session-bbbb2222', label: 'Music Region 地图模块',
         status: 'tool', tag: 'Executing Tool', glow: '#00D2AA',
         actionText: '执行 edit', detailText: 'src/map/TileSource.kt',
-        elapsedText: '00:08', turnStepText: 'T1·S2',
+        elapsedMs: 8000, elapsedText: '00:08', turnStepText: 'T1·S2',
+        contextText: '18%', contextFraction: 0.18,
       }),
       entry({
         id: 'session-aaaa1111', label: 'AlexNet 架构可视化',
         status: 'done', tag: 'Done', glow: '#4ADE80',
         actionText: '任务已完成', turnStepText: 'T3·S7',
+        contextText: '67%', contextFraction: 0.67,
       }),
     ]),
   },
@@ -240,9 +298,9 @@ async function measureIsland(win) {
 }
 
 async function shootScene(win, scene) {
-  // 1. 推合成快照（renderer.js 的 onSnapshot 会立刻重画）
-  win.webContents.send('island:snapshot', scene.snap);
-  await sleep(700);   // 跨过 340ms 宽/高/圆角弹簧，等展开态稳定
+  // 1. 推合成快照（renderer.js 的 onSnapshot 会立刻重画；rev 每个场景不同）
+  win.webContents.send('island:snapshot', scene.snap());
+  await sleep(700);   // 跨过 340ms 宽/高/圆角弹簧 + 140ms 模式交叉淡化
 
   // 2. 悬停展开：合成 mousemove 落到岛心（穿透窗口只认转发事件，同冒烟测试）
   if (scene.hover) {
@@ -254,7 +312,7 @@ async function shootScene(win, scene) {
     await sleep(250);   // 跨过 200ms 驻留门槛
     await win.webContents.executeJavaScript(
       `document.dispatchEvent(new MouseEvent('mousemove', { clientX: ${cx}, clientY: ${cy + 6} }))`);
-    await sleep(800);   // 等 340ms 高度弹簧走完
+    await sleep(800);   // 等 340ms 高度弹簧 + 170ms 分层入场走完
   }
 
   // 3. 量岛体实际矩形，外扩 MARGIN 圈住光晕，按窗口边界钳制后裁剪截图
@@ -286,10 +344,11 @@ app.commandLine.appendSwitch('force-device-scale-factor', '2');
 
 app.whenReady().then(async () => {
   // 岛在真实环境里点的每个 IPC 都要有回应（渲染层的 invoke 才不报未处理）
-  ipcMain.handle('island:set-interactive', () => true);
-  ipcMain.handle('island:jump', () => ({ kind: 'bridged', isSuccess: true, brief: '已切到该对话' }));
-  ipcMain.handle('island:open-dsh', () => ({ ok: true, how: 'stub' }));
-  ipcMain.handle('island:open-config-dir', () => true);
+  for (const ch of ['island:set-interactive', 'island:jump', 'island:open-dsh',
+    'island:open-config-dir', 'island:context-menu', 'island:notify',
+    'island:hide', 'island:show', 'island:quit', 'island:toggle-notch']) {
+    ipcMain.handle(ch, () => true);
+  }
 
   const win = new BrowserWindow({
     width: WINDOW_W,
@@ -299,7 +358,7 @@ app.whenReady().then(async () => {
     backgroundColor: '#00000000',
     skipTaskbar: true,
     resizable: false,
-    show: false,     // 不打扰用户：全程离屏渲染
+    show: false,
     webPreferences: {
       preload: path.join(SRC, 'preload.js'),
       contextIsolation: true,
@@ -311,7 +370,11 @@ app.whenReady().then(async () => {
 
   await win.loadFile(path.join(SRC, 'index.html'));
   await win.webContents.insertCSS(BACKDROP);
-  await sleep(600);   // 等渲染层订阅 onSnapshot
+  // 必须真的 show 出来（几乎透明、不抢焦点）：隐藏窗口 ~1s 后 rAF 被节流到
+  // 1Hz，弹簧/入场动画不推进，截到的是上一场景的画面（见文件头踩坑记录）。
+  win.setOpacity(0.02);
+  win.showInactive();
+  await sleep(700);   // 等渲染层订阅 onSnapshot + 首帧
 
   for (const scene of SCENES) {
     await shootScene(win, scene);

@@ -57,9 +57,51 @@ const config = require('./config.js');
 const { SessionMonitor } = require('./monitor.js');
 const bridge = require('./bridge.js');
 const { performJump } = require('./jump.js');
+// 快照协议是纯函数模块（无 electron 依赖），可直接被 node 单测 —— 见 snapshot.js。
+const { buildSnapshot, nextDelay } = require('./snapshot.js');
 
-/** 轮询间隔。与 Swift 版一致 —— 250ms 是「跟手」与「不烧 CPU」的交点。 */
-const TICK_MS = 250;
+/**
+ * 穿透看门狗间隔（契约 §5 第 3 条「穿透永不粘连」）。
+ *
+ * 渲染层已经有两道防线（pointermove 节流 + mouseleave、transitionend 复算），
+ * 但都依赖「事件能进来」。`setIgnoreMouseEvents(true, {forward:true})` 只在
+ * 指针位于窗口内时转发 mousemove：一旦指针出窗，渲染层就再也收不到事件，
+ * 若最后一条事件恰好把窗口切成了「接管」态，这个状态就**永远**收不回来 ——
+ * 表现为岛外一圈透明区域把桌面点击全吞掉，且只能重启 app。所以主进程这条
+ * 用真实光标位置兜底，500ms 一次，是唯一不依赖渲染进程的事件源。
+ */
+const WATCHDOG_MS = 500;
+
+/**
+ * 光标轮询间隔 —— **悬停的主驱动**（33ms ≈ 30Hz）。
+ *
+ * ## 为什么不能只靠 `forward: true`
+ *
+ * 原方案让渲染层吃 Electron 转发的 mousemove 做命中判定。真机实测（2026-10-19）
+ * 发现一个致命限制：**窗口一旦有 `-webkit-app-region: drag` 区域，转发事件就
+ * 几乎被掐断** —— 同一位置对比，全部元素改 no-drag 时 500ms 收到 46 条，
+ * 带拖拽区时只收到 1 条。表现就是「只有岛上一个很窄的位置能触发展开」，而这
+ * 恰好是悬停体验最不能被破坏的地方。
+ *
+ * 拖拽区不能删（它是唯一的拖窗手段），所以改成主进程自己读真实光标
+ * （`screen.getCursorScreenPoint`，微秒级系统调用）按窗口坐标换算后推给渲染层。
+ * 渲染层拿到的就是「指针此刻在窗口里的 CSS 坐标」，命中判定和悬停逻辑一行不用
+ * 改，也不再依赖任何转发行为。
+ */
+const CURSOR_POLL_MS = 33;
+
+
+/** 桥健康探测间隔。桥起没起不需要 250ms 精度；2s 且**变化才刷托盘**。 */
+const BRIDGE_PROBE_MS = 2000;
+
+/**
+ * 跳转回执在快照里保留多久。
+ *
+ * 旧实现把 lastJump 永远留着，靠渲染层按 `Date.now() - at < 6000` 自己隐藏；
+ * rev 去重后「到点该消失了」这件事没有一拍会触发推送，新 renderer 会一直
+ * 显示旧回执。所以主进程到点把它清掉 —— 清掉本身让 rev 变化，正好推一跳。
+ */
+const JUMP_HOLD_MS = 6000;
 
 /**
  * 固定窗口尺寸：按**最大展开态**一次开好（macOS 版 NotchMetrics 的
@@ -78,11 +120,47 @@ let win = null;
 let tray = null;
 let monitor = null;
 let tickIndex = 0;
-let lastSnapshotJson = '';
 let bridgeState = { ok: false, port: bridge.FALLBACK_PORT, plugin: null };
 let lastJump = null;       // { kind, brief, at }
 let requestedHidden = false;
 let forceShow = false;     // 仅冒烟模式用：无条件显示
+
+// ── 快照 / 轮询状态（v2）──
+/** 最近一拍组装好的 DTO。窗口显隐判断与冒烟输出都读它，不再解析 JSON 字符串。 */
+let lastPayload = null;
+/** 上一次真正发出去的 rev。相同就不发 —— 这是「只在真变化时推送」的落点。 */
+let lastRev = '';
+/**
+ * renderer 是否已经 load 完。
+ *
+ * 在这之前 `webContents.send` 发出去的消息会被丢掉（订阅还没建立）。所以那时
+ * **不能**推进 lastRev：否则首帧内容若一直不变，之后就再也不会推 —— 岛白屏。
+ */
+let rendererLoaded = false;
+/** 首帧快照是否已发出。窗口要等它之后才 show，避免先露出一个空窗再「弹出」内容。 */
+let firstSnapshotSent = false;
+/** 递归 setTimeout 的句柄。用递归而不是 setInterval：每拍间隔由 nextDelay 决定。 */
+let loopTimer = null;
+/** 穿透看门狗句柄。退出路径必须清掉，否则进程被它多吊着 500ms。 */
+let watchdogTimer = null;
+/**
+ * 渲染层是否正持有「临时接管」（窗口当前不穿透）。
+ *
+ * 唯一真相源在这里而不是渲染层：看门狗要用它判断「有没有东西可收回」，
+ * 而渲染层在指针出窗后已经收不到事件、无法自证。
+ */
+let interactive = false;
+/** 光标轮询句柄（悬停主驱动）。窗口隐藏/退出时必须清掉。 */
+let cursorTimer = null;
+/** 上一次推给渲染层的光标状态（去重用：位置没变就不发 IPC）。 */
+let lastCursorKey = '';
+/** 调试追踪：只记「首条成功/首条失败」，避免 30Hz 刷爆日志。 */
+let cursorTraceSent = false;
+let cursorTraceFailed = false;
+/** 上次探桥的时间戳（按时间而不是 tickIndex 计：轮询间隔已不是固定 250ms）。 */
+let lastBridgeProbeAt = 0;
+/** 退出中：阻止已排队的 tick 再跑一拍。 */
+let quitting = false;
 
 // ───────────────────────────── 单实例 ─────────────────────────────
 
@@ -208,11 +286,36 @@ function createWindow() {
     if (!url.startsWith('file://')) e.preventDefault();
   });
 
-  win.on('closed', () => { win = null; });
+  win.on('closed', () => {
+    win = null;
+    releasePointer('window-closed');
+  });
 
+  // 首帧快照发出之后才允许 show（判断在 applyVisibility 里）：
+  // 透明窗口若先露出来，页面还是空的，肉眼看到的是「空一下，再弹出内容」。
   win.once('ready-to-show', () => {
     applyVisibility();
   });
+
+  // 页面就绪 → 立刻把最近一拍补发。
+  // 这是「首帧一定到渲染层」的唯一保证：首拍通常比 loadFile 完成更早，
+  // 那时 send 出去的消息没有订阅者，会被静默丢掉；而 rev 去重意味着
+  // 如果内容一直不变，后面再也不会补发 —— 岛就会白屏到第一次状态变化为止。
+  win.webContents.on('did-finish-load', () => {
+    rendererLoaded = true;
+    if (lastPayload && sendSnapshot(lastPayload)) {
+      lastRev = lastPayload.rev;
+      firstSnapshotSent = true;
+      applyVisibility();
+      // 首拍往往发生在 load 之前，那一拍把下一拍排到了 1000ms（当时窗口不可见）；
+      // 现在窗口已可见，立刻重排一次，让它进入 250ms 档，而不是先定住一秒。
+      poke();
+    }
+  });
+
+  // 窗口隐藏 / 被拖动 / 显示器变化后，穿透必须复位（见 watchdog 一节）。
+  win.on('hide', () => releasePointer('window-hide'));
+  win.on('move', () => { if (dragOrigin) return; releasePointer('window-move'); });
 
   placeWindow();
   // 先不 show —— 等首帧快照到了由 applyVisibility 决定
@@ -220,12 +323,18 @@ function createWindow() {
 
 function showWindow() {
   if (!win) return;
-  if (!win.isVisible()) win.show();
+  if (win.isVisible()) { win.focus(); return; }
+  win.show();
   win.focus();
+  // 窗口从隐藏态恢复 → 光标轮询要恢复（悬停主驱动），轮询也要立刻回到 250ms 档。
+  startCursorWatch();
+  poke();
 }
 
 function hideWindow() {
   if (!win) return;
+  // 窗口不可见时光标轮询没有意义（也读不到可靠的窗口坐标），先停掉。
+  stopCursorWatch();
   if (win.isVisible()) win.hide();
 }
 
@@ -340,68 +449,258 @@ function refreshTrayMenu() {
   tray.setContextMenu(menu);
 }
 
+// ───────────────────────────── 穿透看门狗 ─────────────────────────────
+
+/**
+ * 主进程 → 渲染层的统一发送口。
+ *
+ * ⚠️ 退出过程中定时器还会再打一拍，而那时渲染帧已经销毁了 —— 直接 send 会抛
+ * 「Render frame was disposed」，在退出日志里留一串红字。所有发送必须过这里。
+ */
+function sendToRenderer(channel, payload) {
+  if (!win || win.isDestroyed()) return false;
+  const wc = win.webContents;
+  if (!wc || wc.isDestroyed()) return false;
+  try {
+    wc.send(channel, payload);
+    return true;
+  } catch (e) {
+    console.warn('[dsh-notch] 推送失败(' + channel + '):', e && e.message);
+    return false;
+  }
+}
+
+/** 发快照。rev 去重由调用方负责（去重状态在 tick 里，不在发送函数里）。 */
+function sendSnapshot(payload) {
+  return sendToRenderer('island:snapshot', payload);
+}
+
+/**
+ * 强制收回穿透，并通知渲染层复位悬停状态。幂等。
+ *
+ * 触发源：看门狗（指针出窗）、窗口隐藏、窗口被拖动、显示器几何变化、退出。
+ * 为什么必须由主进程收回：`forward:true` 只在指针位于窗口内时转发 mousemove，
+ * 指针一出窗渲染层就收不到任何事件 —— 若最后一条事件恰好把窗口切成了接管态，
+ * 它就**再也解不开**，岛外一圈透明区域会一直吞掉桌面点击，只能重启 app。
+ *
+ * @param {string} reason 仅用于 trace 排障（'watchdog' / 'window-hide' / ...）
+ */
+function releasePointer(reason) {
+  const was = interactive;
+  interactive = false;
+  if (win && !win.isDestroyed()) {
+    try { win.setIgnoreMouseEvents(true, { forward: true }); } catch { /* 已销毁 */ }
+  }
+  if (was) {
+    // 渲染层收到后把 overIsland / interactiveReq 归零并重渲染 —— 否则岛会保持
+    // 「悬停展开 / 钉住」的假象，等到下一次鼠标移动才恢复。
+    sendToRenderer('island:pointer-leave');
+    trace('[trace] 收回穿透 reason=' + reason);
+  }
+}
+
+/**
+ * 500ms 看门狗（契约 §5「穿透永不粘连」第 3 条）。
+ *
+ * 只在「已接管」时需要动作：常态穿透下不存在会粘连的状态。命中判定用
+ * `screen.getCursorScreenPoint()`（真实光标，DIP 坐标，与 getBounds 同单位）
+ * 对窗口矩形 —— 这里**故意**判整窗而不是岛体：只要指针还在窗口内，渲染层就
+ * 还能收到转发的 mousemove，它自己的命中判定会把穿透切回去。指针已在窗口外
+ * 而 interactive 仍为 true 才是唯一的故障态，也正是这条 watchdog 存在的理由。
+ */
+function watchdogTick() {
+  if (!win || win.isDestroyed()) return;
+  if (!interactive) return;                 // 常态穿透：无事可做
+  if (!win.isVisible()) { releasePointer('hidden'); return; }
+  // ⚠️ 冒烟模式下不判：它的「悬停」是 executeJavaScript 合成的 mousemove
+  // （见 startLoop 里的 SMOKE 段），真实光标可能在屏幕任何地方 —— 按真实
+  // 光标判定必然误判成「指针已出窗」，把正要截图的展开态收回去。冒烟窗口
+  // 只活几秒、随后整个进程退出，不参与粘连防护没有副作用；看门狗本身由
+  // 单测与源码断言覆盖。
+  if (process.env.DSH_NOTCH_SMOKE === '1') return;
+  let p;
+  let b;
+  try {
+    p = screen.getCursorScreenPoint();
+    b = win.getBounds();
+  } catch {
+    return;                                 // 拔显示器之类的瞬态，下一拍再看
+  }
+  const inside = p.x >= b.x && p.x < b.x + b.width
+    && p.y >= b.y && p.y < b.y + b.height;
+  if (inside) return;
+  releasePointer('watchdog');
+}
+
+/**
+ * 读真实光标在窗口里的 CSS 坐标（与渲染层坐标系一致）。
+ *
+ * `screen.getCursorScreenPoint()` 返回 DIP，`win.getBounds()` 也是 DIP —— 两者
+ * 相减就是窗口内容坐标。窗口无边框，所以 bounds == 内容区。
+ *
+ * @returns {{ x: number, y: number, inside: boolean }|null}
+ */
+function cursorInWindow() {
+  if (!win || win.isDestroyed()) return null;
+  let p;
+  let b;
+  try {
+    p = screen.getCursorScreenPoint();
+    b = win.getBounds();
+  } catch {
+    return null;                       // 拔显示器 / 窗口销毁中的瞬态
+  }
+  const x = p.x - b.x;
+  const y = p.y - b.y;
+  const inside = x >= 0 && y >= 0 && x < b.width && y < b.height;
+  return { x, y, inside };
+}
+
+/**
+ * 光标轮询一拍：把「指针在窗口里的位置」推给渲染层，由它做岛体命中与悬停。
+ *
+ * 两个职责：
+ * 1. 悬停驱动 —— 摆脱 `forward:true` 在拖拽区上的失效（见 CURSOR_POLL_MS 注释）；
+ * 2. 快速收回穿透 —— 指针一出窗立刻 releasePointer，比 500ms 看门狗快一个数量级
+ *    （出窗那一瞬间若窗口还在「接管」态，岛外透明区会短暂吞掉桌面点击）。
+ */
+function cursorTick() {
+  if (!win || win.isDestroyed() || !win.isVisible()) return;
+  const pos = cursorInWindow();
+  if (!pos) return;
+
+  if (!pos.inside) {
+    // 出窗：立刻收回穿透（幂等），并只通知渲染层一次。
+    if (interactive) releasePointer('cursor-out');
+    if (lastCursorKey !== 'out') {
+      lastCursorKey = 'out';
+      sendToRenderer('island:cursor', { inside: false });
+    }
+    return;
+  }
+
+  // 位置没变就不发 IPC（悬停静止时零开销）；0.5px 粒度足够平滑。
+  const x = Math.round(pos.x * 2) / 2;
+  const y = Math.round(pos.y * 2) / 2;
+  const key = x + ',' + y;
+  if (key === lastCursorKey) return;
+  lastCursorKey = key;
+  const ok = sendToRenderer('island:cursor', { inside: true, x, y });
+  if (ok && !cursorTraceSent) {
+    cursorTraceSent = true;
+    trace('[trace] 首条光标位置已推送 x=' + x + ' y=' + y);
+  } else if (!ok && !cursorTraceFailed) {
+    cursorTraceFailed = true;
+    trace('[trace] 光标位置推送失败（renderer 未就绪？）');
+  }
+}
+
+/** 启动光标轮询（幂等）。冒烟模式不启动：合成的 hover 与真实光标无关。 */
+function startCursorWatch() {
+  if (cursorTimer) return;
+  if (process.env.DSH_NOTCH_SMOKE === '1') { trace('[trace] 光标轮询跳过（冒烟模式）'); return; }
+  lastCursorKey = '';
+  cursorTimer = setInterval(cursorTick, CURSOR_POLL_MS);
+  trace('[trace] 光标轮询已起 interval=' + CURSOR_POLL_MS + 'ms');
+}
+
+/** 停止光标轮询（窗口隐藏 / 退出）。 */
+function stopCursorWatch() {
+  if (cursorTimer) {
+    clearInterval(cursorTimer);
+    cursorTimer = null;
+    trace('[trace] 光标轮询已停');
+  }
+  lastCursorKey = '';
+}
+
 // ───────────────────────────── 轮询 ─────────────────────────────
 
-function snapshot() {
-  const cfg = config.load();
-  const now = Date.now();
+/**
+ * 组装一拍快照。纯映射（字段白名单、rev、体积）全在 snapshot.js ——
+ * 这里只负责取数据，这样协议部分可以用 node 直接单测。
+ *
+ * @param {object} cfg 本拍 config.load() 的结果（调用方每拍只 load 一次）
+ * @param {number} now 本拍时间戳
+ */
+function takeSnapshot(cfg, now) {
+  // 回执到点就清掉：rev 去重下，「该消失了」没有别的东西会触发推送。
+  if (lastJump && now - lastJump.at > JUMP_HOLD_MS) lastJump = null;
   const entries = monitor ? monitor.poll(now, tickIndex) : [];
-  return {
-    now,
-    entries,
-    config: {
-      notchEnabled: cfg.notchEnabled,
-      jumpEnabled: cfg.jumpEnabled,
-      idleHide: cfg.idleHide,
-      scale: cfg.scale,
-      fileExists: cfg.fileExists,
-      raw: cfg.raw,
-    },
-    bridge: bridgeState,
-    jump: lastJump,
-  };
+  return buildSnapshot({ entries, config: cfg, bridge: bridgeState, jump: lastJump, now });
+}
+
+/** 当前 tick 函数（startLoop 里赋值）。poke() 用它把等待中的下一拍提前。 */
+let tickFn = null;
+
+/**
+ * 请求「尽快再跑一拍」。
+ *
+ * 用在哪：跳转回执刚产生、窗口刚从托盘重新显示出来。这两件事都必须立刻反映
+ * 到岛上，而自适应轮询在空闲/隐藏时可能正睡 1000ms —— 等它自然醒，点击反馈
+ * 会慢到像没反应。这里只清掉当前等待并立刻重排，**不新增定时器**。
+ */
+function poke() {
+  if (!tickFn) return;
+  if (loopTimer) {
+    clearTimeout(loopTimer);
+    loopTimer = null;
+  }
+  loopTimer = setTimeout(tickFn, 0);
 }
 
 function startLoop() {
   monitor = new SessionMonitor();
 
+  /**
+   * 递归 setTimeout 而不是 setInterval：下一拍等多久由 nextDelay 决定
+   * （有活跃会话 250ms / 全空闲或窗口隐藏 1000ms）。固定间隔的 setInterval
+   * 做不到这件事，而「再加一个高频定时器」是契约 §7 明令禁止的。
+   */
   const tick = () => {
+    loopTimer = null;
+    if (quitting) return;
     tickIndex += 1;
-    let snap;
+
+    // 每拍只 load 一次配置：下面判显隐、判 scale、给快照用的是同一份。
+    const cfg = config.load();
+    const now = Date.now();
+
+    let payload = null;
     try {
-      snap = snapshot();
+      payload = takeSnapshot(cfg, now);
     } catch (e) {
       // 单拍出错不该让岛整个死掉 —— 记日志，下一拍再来
       console.error('[dsh-notch] poll 异常:', e && e.stack);
-      return;
     }
 
-    const json = JSON.stringify(snap);
-    if (json !== lastSnapshotJson) {
-      lastSnapshotJson = json;
-      // ⚠️ 退出过程中定时器还会再打一拍，而那时渲染帧已经销毁了 ——
-      // 直接 send 会抛「Render frame was disposed」，在退出日志里留一串红字。
-      if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
-        try {
-          win.webContents.send('island:snapshot', snap);
-        } catch (e) {
-          console.warn('[dsh-notch] 推送快照失败:', e && e.message);
+    if (payload) {
+      lastPayload = payload;
+      // rev 去重：内容指纹没变就不发（serverNow 不参与 rev，见 snapshot.js）。
+      // renderer 还没 load 完时发出的消息会被丢掉，所以那之前**不推进**
+      // lastRev —— 否则首帧内容若一直不变，就再也不会补发，岛白屏。
+      if (rendererLoaded && payload.rev !== lastRev) {
+        if (sendSnapshot(payload)) {
+          lastRev = payload.rev;
+          firstSnapshotSent = true;
         }
       }
     }
 
     // 配置可能在两次 tick 之间被设置面板改了
-    applyVisibility();
+    applyVisibility(cfg);
 
     // scale 变化要重摆窗口（尺寸 = MAX_WINDOW × scale），其余几何不变
-    const wantScale = config.load().scale || 1;
+    const wantScale = cfg.scale || 1;
     if (win && !win.isDestroyed() && (win._scale || 1) !== wantScale) {
       win._scale = wantScale;
       placeWindow();
     }
 
-    // 每 8 拍探一次桥（约 2s）—— 桥起没起不需要 250ms 精度
-    if (tickIndex % 8 === 1) {
+    // 每 2s 探一次桥。按**时间**算而不是 tickIndex % 8：轮询间隔已经会在
+    // 250/1000ms 之间变，按下标算会让空闲时变成 8s 才探一次。
+    if (now - lastBridgeProbeAt >= BRIDGE_PROBE_MS) {
+      lastBridgeProbeAt = now;
       bridge.health().then((r) => {
         // 判定要不要刷托盘菜单：pending 也要算进去。
         // 只比 ok/port 的话，「0 条待处理 → 1 条待处理」不会触发刷新，
@@ -413,9 +712,14 @@ function startLoop() {
         if (changed) refreshTrayMenu();
       }).catch(() => { /* 探桥失败就当没桥 */ });
     }
+
+    // 自适应下一拍。注意 hidden 要在 applyVisibility 之后算 —— 这一拍刚把
+    // 窗口显示出来的话，下一拍应该回到 250ms 而不是继续睡 1000ms。
+    const hidden = !win || win.isDestroyed() || !win.isVisible();
+    loopTimer = setTimeout(tick, nextDelay(payload && payload.entries, hidden));
   };
 
-  const timer = setInterval(tick, TICK_MS);
+  tickFn = tick;
   tick();
 
   // ── 端到端冒烟（仅 DSH_NOTCH_SMOKE=1 时生效）──
@@ -468,9 +772,20 @@ function startLoop() {
         lines.push('折叠岛体 = ' + Math.round(c.w) + 'x' + Math.round(c.h));
         await shot('smoke-collapsed.png', c);
 
-        // 展开态：把指针「挪」到岛心（穿透窗口只认转发的 mousemove）→ 等驻留+弹簧 → 再量再截
-        const fire = (x, y) => win.webContents.executeJavaScript(
-          `document.dispatchEvent(new MouseEvent('mousemove', { clientX: ${x}, clientY: ${y} }))`);
+        // 展开态：把指针「挪」到岛心（穿透窗口只认转发的 mousemove）→ 等驻留+弹簧 → 再量再截。
+        // 两种事件都派发：渲染层 v2 用 pointermove（命中判定），旧版用 mousemove；
+        // 合成事件不会互相冒充（MouseEvent('mousemove') 不会触发 pointermove 监听），
+        // 所以这里必须两个都发，否则换渲染层后冒烟会「展开不动」。
+        const fire = (x, y) => win.webContents.executeJavaScript(`(() => {
+          const opts = { clientX: ${x}, clientY: ${y}, bubbles: true };
+          document.dispatchEvent(new MouseEvent('mousemove', opts));
+          if (typeof PointerEvent === 'function') {
+            document.dispatchEvent(new PointerEvent('pointermove', Object.assign({
+              pointerId: 1, pointerType: 'mouse', isPrimary: true,
+            }, opts)));
+          }
+          return true;
+        })()`);
         await fire(Math.round(c.x + c.w / 2), Math.round(c.y + c.h / 2));
         await new Promise((r) => setTimeout(r, 250));   // 跨过 200ms 驻留门槛
         await fire(Math.round(c.x + c.w / 2), Math.round(c.y + c.h / 2) + 4);
@@ -479,7 +794,7 @@ function startLoop() {
         lines.push('展开文本 = ' + JSON.stringify(e.text));
         lines.push('展开岛体 = ' + Math.round(e.w) + 'x' + Math.round(e.h));
         await shot('smoke-expanded.png', e);
-        lines.push('会话数 = ' + (JSON.parse(lastSnapshotJson).entries || []).length);
+        lines.push('会话数 = ' + ((lastPayload && lastPayload.entries) || []).length);
 
         for (const l of lines) console.log('[smoke] ' + l);
         // 打包后的 exe 是 Windows GUI 子系统进程，stdout 拿不到（终端里一片空白），
@@ -496,28 +811,32 @@ function startLoop() {
   }
 }
 
-/** 决定窗口此刻该不该显示。 */
-function applyVisibility() {
+/**
+ * 决定窗口此刻该不该显示。
+ *
+ * @param {object} [cfg] 本拍已经 load 过的配置；不传则现场读（IPC 路径用）
+ */
+function applyVisibility(cfg) {
   if (!win) return;
   // 冒烟模式：无条件显示（否则「空闲自动收起」会立刻把它藏起来，什么也看不到）
   if (forceShow) { if (!win.isVisible()) win.show(); return; }
-  const cfg = config.load();
-  if (requestedHidden || !cfg.notchEnabled) { hideWindow(); return; }
+  const c = cfg || config.load();
+  if (requestedHidden || !c.notchEnabled) { hideWindow(); return; }
 
-  // 空闲收起：一个活跃会话都没有时把岛藏起来（macOS 的 idleHide 同义）
-  if (cfg.idleHide && monitor) {
-    const entries = lastSnapshotJson ? safeParseEntries() : [];
-    const anyActive = entries.some((e) => e && e.status && e.status !== 'idle');
-    if (!anyActive) { hideWindow(); return; }
+  // 首帧快照发出之前不 show：透明窗口先露出来时页面还是空的，
+  // 肉眼看到的是「空一下，再弹出内容」。等首帧数据到了再显示。
+  if (!firstSnapshotSent) { hideWindow(); return; }
+
+  // 空闲收起：一个活跃会话都没有时把岛藏起来（macOS 的 idleHide 同义）。
+  // 直接用 DTO 的 live（= status !== 'idle'），不再解析 JSON 字符串。
+  if (c.idleHide) {
+    const entries = (lastPayload && lastPayload.entries) || [];
+    if (!entries.some((e) => e && e.live === true)) { hideWindow(); return; }
   }
-  if (!win.isVisible()) win.show();
-}
-
-function safeParseEntries() {
-  try {
-    return JSON.parse(lastSnapshotJson).entries || [];
-  } catch {
-    return [];
+  if (!win.isVisible()) {
+    win.show();
+    // 显示路径有多条（首帧、托盘、idleHide 恢复），统一在这里挂光标轮询。
+    startCursorWatch();
   }
 }
 
@@ -544,7 +863,10 @@ ipcMain.handle('island:jump', async (_e, payload) => {
       : async () => false,
   });
   lastJump = { kind: outcome.kind, brief: outcome.brief, at: Date.now() };
-  lastSnapshotJson = '';   // 强制下一拍立刻把提示推给渲染层
+  // 立刻补一拍：rev 因 at 变了必然不同，渲染层马上就能拿到回执。
+  // 旧实现靠「清空上一次快照字符串」强制下一拍必推；rev 去重这套里不再需要
+  // 那种「清空去重状态」的技巧 —— 回执内容本身就变了。
+  poke();
   return { ok: outcome.isSuccess, brief: outcome.brief, kind: outcome.kind };
 });
 
@@ -552,8 +874,12 @@ ipcMain.handle('island:jump', async (_e, payload) => {
  * 指针进岛/出岛：切窗口的点击穿透。判定在渲染层（它有岛的当前矩形和
  * 转发来的指针位置），这里只执行。穿透是常态，进岛才临时接管 ——
  * macOS 版 NotchPanel.isInteractive 的同一条纪律。
+ *
+ * ⚠️ 这条 IPC 翻转的是 main 侧的 `interactive` 状态，500ms 看门狗才有的放矢：
+ * 若渲染层因为收不到 mouseleave 而「忘了」发 false，看门狗能强制收回。
  */
 ipcMain.handle('island:set-interactive', (_e, value) => {
+  interactive = !!value;
   if (win && !win.isDestroyed()) {
     try {
       win.setIgnoreMouseEvents(!value, { forward: true });
@@ -561,8 +887,42 @@ ipcMain.handle('island:set-interactive', (_e, value) => {
       trace('[trace] setIgnoreMouseEvents 失败: ' + (e && e.message));
     }
   }
+  // 这段是 main 侧 `interactive` 状态的唯一写入口（看门狗、hide/move 复位都读它）。
+  // 刻意不抽成独立函数：只在这一个地方被调用，抽出去只会让「谁改的」更难追。
   return true;
 });
+
+/**
+ * 自定义拖窗：替代 \`-webkit-app-region: drag\`。
+ *
+ * 真机事故（2026-10-19）：带拖拽区的窗口上，点击岛体会触发 Windows 的
+ * 非客户区拖拽（窗口真的被拖走几个像素），页面收不到 click —— 钉住/跳转
+ * 全部失效；同时 forward:true 的 mousemove 也被掐断。拖拽区不能删了就算
+ * 完，拖窗能力改由这里实现：渲染层报指针屏幕坐标，主进程按位移搬窗口。
+ */
+let dragOrigin = null;
+ipcMain.handle('island:drag-start', () => {
+  if (!win || win.isDestroyed()) return false;
+  let p;
+  let b;
+  try { p = screen.getCursorScreenPoint(); b = win.getBounds(); } catch { return false; }
+  dragOrigin = {
+    cursorX: p.x, cursorY: p.y,
+    x: b.x, y: b.y, width: b.width, height: b.height,
+  };
+  return true;
+});
+ipcMain.handle('island:drag-move', (_e, point) => {
+  if (!dragOrigin || !win || win.isDestroyed()) return false;
+  const x = Math.round(dragOrigin.x + ((point && point.x) - dragOrigin.cursorX));
+  const y = Math.round(dragOrigin.y + ((point && point.y) - dragOrigin.cursorY));
+  // 用 setBounds（把尺寸钉回拖拽开始时的值）而不是 setPosition：
+  // 透明 + 非整数 DPI 下反复 setPosition 会让 Windows 对尺寸做 ±1 的取整漂移，
+  // 拖几次窗口就悄悄变宽几个像素。
+  win.setBounds({ x, y, width: dragOrigin.width, height: dragOrigin.height });
+  return true;
+});
+ipcMain.handle('island:drag-end', () => { dragOrigin = null; return true; });
 
 ipcMain.handle('island:hide', () => {
   requestedHidden = true;
@@ -573,6 +933,7 @@ ipcMain.handle('island:hide', () => {
 ipcMain.handle('island:show', () => {
   requestedHidden = false;
   applyVisibility();
+  poke();     // 立刻回到 250ms 档（隐藏期间轮询是 1000ms）
   return true;
 });
 
@@ -590,6 +951,72 @@ ipcMain.handle('island:open-dsh', () => bringDshToFront());
 ipcMain.handle('island:open-config-dir', () => {
   shell.openPath(config.appDataDir());
   return true;
+});
+
+/**
+ * 岛体右键 → 原生菜单（契约 §5「右键」一行）。
+ *
+ * 为什么菜单必须由主进程弹：岛窗口常态是鼠标穿透的，渲染层画不出能盖住其它
+ * 应用的菜单；而且「隐藏」「退出」这类动作本来就在主进程。
+ *
+ * 为什么「钉住/取消钉住」不在这里直接改状态，而是发一条切换请求回渲染层：
+ * pinned 的唯一真相源在渲染层（它还要同时驱动展开/收起、Esc、点主行）。
+ * 主进程再存一份，必然在某个分支上和它不一致 —— 那种 bug 的表现是「菜单里
+ * 点了钉住，但岛并没有钉住」，且只在特定操作顺序下复现。
+ */
+ipcMain.handle('island:context-menu', (_e, payload) => {
+  if (!win || win.isDestroyed()) return false;
+  const p = (payload && typeof payload === 'object') ? payload : {};
+  const pinned = p.pinned === true;
+  const menu = Menu.buildFromTemplate([
+    {
+      label: pinned ? '取消钉住' : '钉住',
+      click: () => sendToRenderer('island:pin-toggle'),
+    },
+    {
+      // 与托盘里的同名项走同一条路：写进 client-config.json，而不是只藏当前
+      // 进程。只藏进程的坑是：设置面板里还显示「显示中」，两边说法不一致。
+      label: '隐藏灵动岛',
+      click: () => {
+        const v = { ...config.load() };
+        v.notchEnabled = false;
+        config.save(v);
+        applyVisibility();
+        refreshTrayMenu();
+      },
+    },
+    { type: 'separator' },
+    { label: '打开 DSH 设置', click: () => { bringDshToFront(); } },
+    { label: '打开配置目录', click: () => { shell.openPath(config.appDataDir()); } },
+    { type: 'separator' },
+    { label: '退出', click: () => { app.quit(); } },
+  ]);
+  menu.popup({ window: win });
+  return true;
+});
+
+/**
+ * 系统级提示（Windows 托盘气泡）。
+ *
+ * 用在降级路径上：跳转没成功时，岛上的文字回执会被下一跳快照刷掉，而用户
+ * 可能正看着别处。托盘不存在时如实返回 `{ ok: false }` —— 调用方不要假设它
+ * 一定成功（`Tray.displayBalloon` 是 Windows 专属 API，本仓库只在 win32 用）。
+ */
+ipcMain.handle('island:notify', (_e, payload) => {
+  const p = (payload && typeof payload === 'object') ? payload : {};
+  const title = (typeof p.title === 'string' && p.title) ? p.title : 'DSH 灵动岛';
+  const body = (typeof p.body === 'string') ? p.body : '';
+  if (tray) {
+    try {
+      // iconType 显式给 'info'：Windows 的旧式气泡要求有图标类型，
+      // 不传时部分系统版本上弹不出来（Electron 文档里 icon 与 iconType 二选一）。
+      tray.displayBalloon({ title, content: body, iconType: 'info' });
+      return { ok: true, how: 'tray' };
+    } catch (e) {
+      trace('[trace] 托盘气泡失败: ' + (e && e.message));
+    }
+  }
+  return { ok: false, how: 'none' };
 });
 
 // ───────────────────────────── 工具 ─────────────────────────────
@@ -653,8 +1080,17 @@ app.on('ready', () => {
   startLoop();
   trace('[trace] 轮询已起');
 
-  // 显示器变了（插拔外接屏 / 改分辨率）→ 重新定位，否则岛会飘到屏幕外
-  const repo = () => placeWindow(true);
+  // 穿透看门狗：500ms 一次，只在渲染层接管期间真正比较光标位置（见 watchdogTick）。
+  watchdogTimer = setInterval(watchdogTick, WATCHDOG_MS);
+  trace('[trace] 看门狗已起');
+
+  // 显示器变了（插拔外接屏 / 改分辨率）→ 重新定位，否则岛会飘到屏幕外。
+  // 顺带收回穿透：窗口被搬到另一个显示器后，旧坐标下的「接管」状态已无意义，
+  // 且此时指针几乎必然不在新位置 —— 不收回就会吞掉桌面点击。
+  const repo = () => {
+    releasePointer('display-change');
+    placeWindow(true);
+  };
   screen.on('display-added', repo);
   screen.on('display-removed', repo);
   screen.on('display-metrics-changed', repo);
@@ -667,5 +1103,14 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  // 退出路径必须清掉两个定时器：递归 setTimeout 会把自己一直排下去，
+  // 500ms 看门狗也是常驻的 —— 不清的话进程会被多吊一拍，且 tick 可能
+  // 在渲染帧销毁后再 send（虽然 sendToRenderer 已挡，但能少一条日志）。
+  quitting = true;
+  if (loopTimer) { clearTimeout(loopTimer); loopTimer = null; }
+  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
+  stopCursorWatch();
+  tickFn = null;
+  releasePointer('quit');
   if (tray) { tray.destroy(); tray = null; }
 });

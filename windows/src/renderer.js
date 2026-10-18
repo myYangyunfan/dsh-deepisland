@@ -1,409 +1,663 @@
 'use strict';
 /**
- * 渲染进程 —— 岛的界面（macOS 版同款架构）。
+ * 渲染进程 —— 岛的界面（v2：骨架只建一次，之后只改文本/属性）。
  *
  * 只做四件事：把主进程推来的快照画出来、把点击翻译成一个 IPC、
  * 驱动展开/收起的弹簧形变、判定「指针在不在岛上」以切换点击穿透。
  * **不读文件、不算状态** —— 那些都在主进程（`monitor.js` / `projections.js`）。
  *
+ * ## v2 为什么重写（2026-10-18 全面优化）
+ *
+ * 旧版每次快照都 `innerHTML =` 重建整块界面，而快照里的 `now` 每拍都变，
+ * 于是 4 次/秒：销毁重建全部节点 → 展开动画被打断、hover 的行被抽走、
+ * 每拍还 `offsetHeight` 强制同步布局两次。界面「能看但发涩」的根源不在
+ * CSS，而在这里。v2 的纪律：
+ *
+ * 1. **快照去重**：主进程带 `rev`，相同直接跳过整次渲染（见 main.js）；
+ * 2. **增量更新**：节点只建一次，之后 `textContent` / class / 变量按差异写；
+ * 3. **零同步布局**：高度用 `ResizeObserver` 量、写 `--island-h`，由 CSS
+ *    过渡；渲染热路径里没有 `offsetHeight` / `getBoundingClientRect`；
+ * 4. **本地时钟**：耗时数字在渲染层按秒自己走，不靠主进程每秒推快照；
+ * 5. **指针 rAF 节流**：`pointermove` 只记位置 + 脏标记，命中判定合并到
+ *    下一帧；矩形缓存，只在尺寸/模式变化后失效。
+ *
  * ## 架构：窗口不动，岛在窗口里动
  *
  * 窗口按最大展开态一次开好（main.js 的 MAX_WINDOW），岛顶对齐、水平居中
- * 钉在窗口里。展开/收起只是 `.island` 自己改宽改高（CSS 弹簧，340ms，
- * 对齐 Swift 的 .spring(response:0.34)），窗口尺寸全程不变 —— GPU 合成
- * 的形变才是 60fps 的来源；「逐帧改窗口尺寸」的老路在 DWM 上必然抖。
+ * 钉在窗口里。展开/收起只是 `.island` 自己改宽改高（CSS 真弹簧，340ms，
+ * 与 Swift `.spring(response:0.34, dampingFraction:0.8)` 同一条曲线）。
  *
  * ## 点击穿透：常态穿透，悬停接管
  *
- * 窗口平时 setIgnoreMouseEvents(true, {forward:true})：比岛大一圈的透明
+ * 窗口平时 `setIgnoreMouseEvents(true, {forward:true})`：比岛大一圈的透明
  * 区域不吞下方应用的点击，鼠标移动事件仍被转发进来。渲染层用转发的
- * 位置做命中判定：进岛 → 请主进程临时接管（可点/可拖），出岛 → 立刻
- * 恢复穿透。与 macOS 版 NotchPanel.isInteractive 同一条纪律。
- *
- * ## 展开/收起
- *
- * - 悬停展开（`expandOnHover`，默认开）：**驻留 200ms** 再展开、移开
- *   **350ms** 后收起 —— macOS 版的手感（0.2s / 0.35s），开防误触、收跟手；
- * - 点状态行**钉住**（`pinned`），钉住后不再因移开而收起；
- * - 「等待人工确认」自动展开（macOS 版同款：这一档状态就是要打断你）；
- * - 点详情块/会话行/统计行 = 跳到那个会话。
+ * 位置对岛体**当前**矩形做命中：进岛 → 请主进程临时接管，出岛 → 立刻
+ * 恢复穿透。三道防线（本文件两道 + 主进程 500ms 看门狗）保证「永不粘连」。
  */
 
 (function () {
-  const el = (id) => document.getElementById(id);
+  const $ = (id) => document.getElementById(id);
 
   /** 悬停驻留（毫秒）：进入等一等（防「划过屏幕顶端」误触），离开宽限一点。 */
   const HOVER_OPEN_MS = 200;
   const HOVER_CLOSE_MS = 350;
   /** 折叠态命中区外扩（Mac hoverHotRect 的 insetBy(-8)）：跟手比精确重要。 */
   const HOT_MARGIN_PX = 8;
-  /** .island 高度弹簧的收尾：之后释放回 auto，免得显式高度裁住内容变化。 */
-  const HEIGHT_SETTLE_MS = 420;
+  /** 展开态已经很大，外扩收到 4px，避免把岛下方应用的可点区算进来。 */
+  const HOT_MARGIN_EXPANDED = 4;
+  /** 耗时走字对齐到整秒；+16ms 是给定时器抖动留的余量。 */
+  const CLOCK_TICK_MS = 1000;
+  /** 指针事件的兜底复算周期：极端情况下（转发的 move 丢失）也不会卡在旧状态。 */
+  const SAFETY_RECHECK_MS = 1000;
+  /** 跳转反馈 / 打开设置反馈的驻留时长。 */
+  const RESULT_HOLD_MS = 6000;
+
+  const root = document.documentElement;
 
   const state = {
     snap: null,
+    rev: '',
+    entries: [],
+    primary: null,
     pinned: false,
-    expandedNow: false,
-    pointer: null,          // 最近一次转发的指针位置（页面坐标）
+    expanded: false,
+    mode: '',
+    /** 指针在岛上的判定结果（决定是否接管鼠标）。 */
     overIsland: false,
-    jump: null,
-    jumpTimer: 0,
-    /** 头部提示区：跳转反馈优先于钉住状态（Mac hintArea 同款优先级）。 */
-    dshHint: null,
-    dshTimer: 0,
+    /**
+     * 主进程是否已经开始推真实光标位置。
+     *
+     * 一旦为 true，就**不再相信** document 上的 mousemove/pointermove：
+     * 窗口带 `-webkit-app-region: drag` 时 Electron 的 forward 转发会被掐断
+     * 或者坐标错位（真机实测：全 no-drag 46 条/带拖拽区 1 条），而主进程推来的
+     * 是 `屏幕光标 - 窗口原点`，与岛体矩形同一坐标系，可靠得多。
+     * shots.js / perf.js 这类没有主进程的合成场景里它保持 false，仍走原路径。
+     */
+    cursorFromMain: false,
+    pointer: null,
+    pointerQueued: false,
+    rect: null,
+    rectDirty: true,
+    interactive: false,
+    /** 自定义拖窗状态：{ id, x0, y0, moved } 或 null。 */
+    drag: null,
+    /** 拖窗结束后短暂抑制 click（否则「拖一下」会顺带钉住/跳转）。 */
+    suppressClickUntil: 0,
     hoverOpenTimer: 0,
     hoverCloseTimer: 0,
-    heightTimer: 0,
-    interactiveReq: null,
+    jump: null,
+    jumpAt: 0,
+    jumpTimer: 0,
+    dshHint: null,
+    dshTimer: 0,
+    focusIndex: -1,
+    clockTimer: 0,
+    lastScale: null,
+    lastGlow: null,
+    /** 会话行 / 统计项的节点缓存（增量更新的依据）。 */
+    rows: new Map(),
+    stats: new Map(),
   };
 
-  /** HTML 转义：会话标题来自 DSH 的磁盘数据，不能被当成标记解析。 */
-  function esc(s) {
-    return String(s === null || s === undefined ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  /* ───────────────────────────── 差异写 DOM 的小工具 ─────────────────────────────
+   *
+   * 三个 helper 都遵守同一条纪律：**值没变就不碰 DOM**。即使这里少写一次
+   * 比较，Chromium 也会因为「写了相同值」触发一次样式失效/重排，4 次/秒
+   * 累积起来就是可感知的抖动。读 `textContent`/`getPropertyValue`/`contains`
+   * 都不触发布局，所以比较是免费的。
+   */
+
+  function setText(node, text) {
+    if (!node) return;
+    const v = (text === null || text === undefined) ? '' : String(text);
+    if (node.textContent !== v) node.textContent = v;
   }
 
-  const LIVE = { thinking: 1, tool: 1, waiting: 1, done: 1 };
+  function setOff(node, off) {
+    if (!node) return;
+    const has = node.classList.contains('is-off');
+    if (has !== !!off) node.classList.toggle('is-off', !!off);
+  }
+
+  function setHidden(node, hidden) { setOff(node, hidden); }
+
+  function setClass(node, cls, on) {
+    if (!node) return;
+    const has = node.classList.contains(cls);
+    if (has !== !!on) node.classList.toggle(cls, !!on);
+  }
+
+  function setCssVar(node, prop, value) {
+    if (!node) return;
+    if (node.style.getPropertyValue(prop) === value) return;
+    node.style.setProperty(prop, value);
+  }
+
+  function setAttr(node, name, value) {
+    if (!node) return;
+    if (node.getAttribute(name) !== String(value)) node.setAttribute(name, String(value));
+  }
+
+  /* ───────────────────────────── 纯函数 ───────────────────────────── */
+
+  const GLOW_IDLE = '#50505A';
 
   function isLive(status) {
-    return !!LIVE[status];
+    return !!status && status !== 'idle';
+  }
+
+  /** 毫秒 → mm:ss（超一小时给 h:mm:ss）。与 activity.js 的 formatDuration 逐字一致。 */
+  function formatDuration(ms) {
+    if (!(ms > 0) || !Number.isFinite(ms)) return '00:00';
+    const total = Math.floor(ms / 1000);
+    if (total >= 3600) {
+      const h = Math.floor(total / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = total % 60;
+      return h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    }
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+  }
+
+  /**
+   * 某条会话的耗时文本。
+   *
+   * 优先用 `elapsedFrom`（epoch ms）在本地按秒算 —— 这样主进程只需要在
+   * 回合开始时推一次，不需要每秒推快照。旧快照只有 `elapsedText` 时退回去。
+   */
+  function elapsedTextOf(entry) {
+    if (!entry) return '';
+    if (typeof entry.elapsedFrom === 'number' && entry.elapsedFrom > 0) {
+      return formatDuration(Date.now() - entry.elapsedFrom);
+    }
+    return typeof entry.elapsedText === 'string' ? entry.elapsedText : '';
+  }
+
+  /** 当前配置（新协议是顶层字段；`raw` 兜住旧快照与 shots.js）。 */
+  function config() {
+    const c = (state.snap && state.snap.config) || {};
+    const raw = (c.raw && typeof c.raw === 'object') ? c.raw : {};
+    const pick = (key, fallback) => {
+      if (typeof c[key] === 'boolean') return c[key];
+      if (typeof raw[key] === 'boolean') return raw[key];
+      return fallback;
+    };
+    return {
+      scale: typeof c.scale === 'number' ? c.scale : (typeof raw.scale === 'number' ? raw.scale : 1),
+      glowEffect: pick('glowEffect', true),
+      expandOnHover: pick('expandOnHover', true),
+      notchEnabled: pick('notchEnabled', true),
+      jumpEnabled: pick('jumpEnabled', true),
+    };
   }
 
   /**
    * 是否展开。优先级：钉住 > 等待确认 > 悬停。
    *
-   * 「等待确认」自动展开的理由：这一档状态的意义就是「需要人」，
-   * 折叠态只有一行 28px 的摘要撑不起它的分量；展开成 HUD 把等待行
-   * 怙到眼前，用户才不会一直晾着 DSH。与 macOS 版行为一致。
+   * 「等待确认」自动展开的理由：这一档状态的意义就是「需要人」，折叠态
+   * 只有一行摘要撑不起它的分量；展开成 HUD 把等待行怼到眼前，用户才不会
+   * 一直晾着 DSH。与 macOS 版行为一致。
    */
-  function shouldExpand(snap) {
+  function shouldExpand() {
+    if (!state.entries.length) return false;   // 没会话时展开只会是一块空板
     if (state.pinned) return true;
-    const cfg = (snap && snap.config) || {};
-    const raw = cfg.raw || {};
-    const waiting = !!(snap && Array.isArray(snap.entries)
-      && snap.entries[0] && snap.entries[0].status === 'waiting');
-    if (waiting) return true;
-    const hoverOn = raw.expandOnHover === false ? false : true;
-    return hoverOn && state.overIsland;
+    if (state.primary && state.primary.status === 'waiting') return true;
+    return config().expandOnHover && state.overIsland;
   }
 
-  function render(snap) {
+  /* ───────────────────────────── 快照入口 ───────────────────────────── */
+
+  function onSnapshot(snap) {
+    if (!snap || typeof snap !== 'object') return;
+
+    // rev 相同 = 内容一个字节都没变（含配置/桥/跳转）。此时唯一还需要走的
+    // 是本地秒级时钟，而它是独立定时器，所以整次渲染都可以跳过。
+    if (typeof snap.rev === 'string' && snap.rev && snap.rev === state.rev) return;
+
     state.snap = snap;
 
-    // ⚠️ snap.config 必须容缺，不能直接 `snap.config.scale`。
-    // 同文件下面的 shouldExpand() 写的是 `snap.config.raw && ...`（有防御），
-    // 而这里曾经裸取 —— 同一个对象两套写法。只要有任何一条路径发来的快照
-    // 少了 config（首帧、IPC 竞态、preload 未就绪时的兜底快照），
-    // 就会在渲染进程抛 `Cannot read properties of undefined`，
-    // 结果是**整个岛白屏**，而且窗口还在、进程还在、日志里只有一行红字，
-    // 症状看起来像「装了但没反应」—— 极难定位。
-    //
-    // 这里统一兜底成空对象，让 scale 退回 1、其余字段读 undefined，
-    // 也就是「按默认尺寸渲染」而不是崩。
-    const cfg = (snap && snap.config) || {};
-    document.documentElement.style.setProperty('--scale', String(cfg.scale || 1));
+    const cfg = config();
+    if (state.lastScale !== cfg.scale) {
+      setCssVar(root, '--scale', String(cfg.scale));
+      state.lastScale = cfg.scale;
+      state.rectDirty = true;
+    }
 
     const entries = Array.isArray(snap.entries) ? snap.entries : [];
-    const primary = entries.length ? entries[0] : null;
+    state.entries = entries;
+    state.primary = entries.length ? entries[0] : null;
 
-    // 光晕跟随主会话的状态色（Mac: status.glowRGB）
-    document.documentElement.style.setProperty('--glow', (primary && primary.glow) || '#50505A');
-
-    // 装饰光总开关（glowEffect，默认开）。状态色本身不受它管 ——
-    // 关掉的是「光」，不是「信息」。
-    const glowOn = !(cfg.raw && cfg.raw.glowEffect === false);
-
-    const expanded = shouldExpand(snap);
-    state.expandedNow = expanded;
-
-    // 状态属性驱动 CSS：data-expanded（形变）、data-live（内/外发光）、
-    // data-glow（装饰光门控）。必须每拍都写：pinned 由点击改变时不重推快照。
-    const island = el('island');
-    if (island) {
-      island.dataset.expanded = expanded ? '1' : '0';
-      island.dataset.glow = glowOn ? '1' : '0';
-      island.dataset.live = (primary && isLive(primary.status)) ? '1' : '0';
+    const glow = (state.primary && state.primary.glow) || GLOW_IDLE;
+    if (state.lastGlow !== glow) {
+      setCssVar(root, '--glow', glow);
+      state.lastGlow = glow;
     }
 
-    // 高度弹簧先于布局类内容写：量高要在内容换完之后（见 animateIslandHeight）
-    el('pinned-hint').textContent = state.pinned ? '已钉住 · 点状态行取消' : '';
+    applyJumpSnapshot(snap.jump);
+    render();
+    // rev 记在渲染成功之后：万一 render 抛错，下一拍还有机会重试，
+    // 而不是把「这一版内容」永久标记成已渲染（界面会停在旧数据上）。
+    if (typeof snap.rev === 'string') state.rev = snap.rev;
+  }
 
-    if (!entries.length) {
-      el('primary').innerHTML = emptyRow();
-      el('list').innerHTML = '';
-      el('stats').innerHTML = '';
-      el('footer').innerHTML = expanded ? footerHtml(snap) : '';
-    } else if (expanded) {
-      el('primary').innerHTML = '';
-      el('list').innerHTML = '';
-      el('stats').innerHTML = statsHtml(primary);
-      el('footer').innerHTML = footerHtml(snap);
-      renderExpandedExtras(entries, primary);
-    } else {
-      el('primary').innerHTML = compactRow(primary, entries);
-      el('list').innerHTML = '';
-      el('stats').innerHTML = '';
-      el('footer').innerHTML = '';
-      clearExpandedExtras();
+  /**
+   * 主进程带下来的跳转结果（用户点了岛上的会话）。同一个 `at` 只记一次，
+   * 否则每拍快照都会把 6 秒的反馈重新点亮。
+   */
+  function applyJumpSnapshot(jump) {
+    if (!jump || typeof jump.brief !== 'string' || !jump.brief) return;
+    const at = typeof jump.at === 'number' ? jump.at : 0;
+    if (at && at === state.jumpAt) return;
+    state.jumpAt = at;
+    state.jump = { kind: jump.kind, brief: jump.brief };
+    clearTimeout(state.jumpTimer);
+    state.jumpTimer = setTimeout(() => { state.jump = null; render(); }, RESULT_HOLD_MS);
+  }
+
+  /* ───────────────────────────── 渲染 ───────────────────────────── */
+
+  function render() {
+    const cfg = config();
+    const entries = state.entries;
+    const primary = state.primary;
+    const expanded = shouldExpand();
+
+    if (state.expanded !== expanded) {
+      state.expanded = expanded;
+      state.rectDirty = true;
+      // 收起后行焦点没有意义，顺手复位
+      if (!expanded) state.focusIndex = -1;
     }
+    const mode = expanded ? 'hud' : 'compact';
+    if (state.mode !== mode) { state.mode = mode; state.rectDirty = true; }
 
-    bindClicks(entries, primary);
+    const island = $('island');
+    const status = primary ? primary.status : 'idle';
+    setAttr(island, 'data-mode', mode);
+    setAttr(island, 'data-expanded', expanded ? '1' : '0');
+    setAttr(island, 'data-status', status);
+    setAttr(island, 'data-live', isLive(status) ? '1' : '0');
+    setAttr(island, 'data-glow', cfg.glowEffect ? '1' : '0');
+    setAttr(island, 'data-pinned', state.pinned ? '1' : '0');
+    setAttr(island, 'aria-label', ariaLabel(primary, entries));
 
-    animateIslandHeight();
+    setText($('pinned-hint'), state.pinned ? '已钉住 · 点状态行取消' : '');
+    setHidden($('pinned-hint'), !state.pinned);
 
-    // 岛的尺寸变了，指针的「在岛上/不在」可能已经翻转 —— 重估穿透与悬停。
-    evaluatePointer();
+    if (expanded) renderHud(entries, primary);
+    else renderCompact(entries, primary);
+
+    updateHint();
+    scheduleClock();
+
+    // 模式/尺寸可能变了：命中矩形失效，下一帧重估（不在这里同步读布局）
+    state.rectDirty = true;
+    queuePointerRecheck();
+  }
+
+  function ariaLabel(primary, entries) {
+    if (!primary) return 'DSH 灵动岛：没有活跃会话';
+    const tag = primary.badge || primary.tag || '';
+    const name = primary.label || primary.shortId || '';
+    const count = entries.length > 1 ? '，共 ' + entries.length + ' 个会话' : '';
+    return 'DSH 灵动岛：' + tag + ' ' + name + count;
   }
 
   /* ───────────── 折叠态：一条信息带（Mac compactRow 口径） ───────────── */
 
-  function compactRow(e, entries) {
-    let tail = '';
-    if (entries.length > 1) {
-      // 多会话：这个位置给「几个在跑/共几个」，等确认转橙（Mac 同款取舍）
-      const live = entries.filter((x) => isLive(x.status)).length;
-      const txt = live > 0 ? live + '/' + entries.length : String(entries.length);
-      const orange = entries.some((x) => x.status === 'waiting');
-      tail = '<span class="chip"' + (orange ? ' style="--chip-ink:#FFAA00"' : '') + '>⚏ ' + txt + '</span>';
-    } else if (e.subagentText) {
-      tail = '<span class="chip" style="--chip-ink:rgb(166,199,255)">👥 ' + esc(e.subagentText) + '</span>';
-    } else {
-      tail = '<span class="chip">' + esc(e.tag) + '</span>';
+  function renderCompact(entries, primary) {
+    setCssVar($('c-dot'), '--dot', (primary && primary.glow) || GLOW_IDLE);
+    setText($('c-title'), primary ? (primary.label || primary.shortId || '会话') : '没有活跃会话');
+
+    // 胶囊位：多会话 → 在跑/总数（Mac rectangle.stack.fill）；
+    // 单会话 → 子代理数（Mac person.2.fill）或工具标签。
+    // ⚠️ 单会话的工具/状态标签**不带图标**：Mac compactRow 里它就是一颗纯文本
+    // 胶囊（工具名用等宽字体），硬塞一个扳手图标会让「Thinking」读起来像在
+    // 执行工具 —— 图标只在它能表达确定语义（多会话、子代理）时才出现。
+    const chip = $('c-chip');
+    let icon = '';
+    let text = '';
+    let ink = '';
+    if (!primary) {
+      text = 'Ready';
+    } else if (entries.length > 1) {
+      const live = entries.filter((e) => isLive(e.status)).length;
+      text = live > 0 ? live + '/' + entries.length : String(entries.length);
+      icon = 'stack';
+      if (entries.some((e) => e.status === 'waiting')) ink = '#FFAA00';
+    } else if (primary.subagentText) {
+      icon = 'users';
+      text = primary.subagentText;
+      ink = 'rgb(166,199,255)';
+    } else if (primary.tag) {
+      text = primary.tag;
     }
+    setText(chip, text);
+    setHidden(chip, !text);
+    if (icon) setAttr(chip, 'data-icon', icon); else chip.removeAttribute('data-icon');
+    setCssVar(chip, '--chip-ink', ink || '');
 
-    let gauge = '';
-    if (e.contextText && e.contextLevel > 0) {
-      gauge = '<span class="gauge' + (e.contextLevel === 2 ? ' danger' : ' warn') + '">' + esc(e.contextText) + '</span>';
-    } else if (e.todoText) {
-      gauge = '<span class="gauge">☑ ' + esc(e.todoText) + '</span>';
+    // 仪表位（最多一个）：上下文告警优先，其次待办进度
+    const gauge = $('c-gauge');
+    let gaugeText = '';
+    let level = '';
+    if (primary && primary.contextText && primary.contextLevel > 0) {
+      gaugeText = primary.contextText;
+      level = primary.contextLevel === 2 ? 'danger' : 'warn';
+    } else if (primary && primary.todoText) {
+      gaugeText = primary.todoText;
+      level = 'todo';
     }
+    setText(gauge, gaugeText);
+    setHidden(gauge, !gaugeText);
+    setClass(gauge, 'warn', level === 'warn');
+    setClass(gauge, 'danger', level === 'danger');
+    setClass(gauge, 'todo', level === 'todo');
+    if (gaugeText) setAttr(gauge, 'data-icon', level === 'todo' ? 'check' : 'ctx');
 
-    const elapsed = (isLive(e.status) && e.elapsedText)
-      ? '<span class="gauge">' + esc(e.elapsedText) + '</span>' : '';
-
-    return '<span class="dot" style="--dot:' + esc(e.glow) + '"></span>'
-      + '<span class="title">' + esc(e.label) + '</span>'
-      + tail + gauge + elapsed;
+    // 耗时：只在活跃时显示 —— 待命会话的 elapsedFrom 是上一回合起点，
+    // 照着算会得出「已经跑了 3 小时」这种莫名数字，比留空更容易误读。
+    const elapsed = $('c-elapsed');
+    const elapsedOn = !!(primary && isLive(primary.status) && elapsedTextOf(primary));
+    setText(elapsed, elapsedOn ? elapsedTextOf(primary) : '');
+    setHidden(elapsed, !elapsedOn);
   }
 
-  function emptyRow() {
-    return '<span class="dot"></span>'
-      + '<span class="title" style="color:var(--text-dim)">没有活跃会话</span>'
-      + '<span class="chip">Ready</span>';
-  }
+  /* ───────────── 展开态：HUD（Mac expandedHUD 口径） ───────────── */
 
-  /* ───────────── 展开态：头部 +（详情/列表）+ 统计（Mac HUD 口径） ───────────── */
-
-  /** 头部 / 详情 / 待办这三块只在展开时存在 —— 折叠时整体摘掉。 */
-  function renderExpandedExtras(entries, primary) {
-    let hdr = document.getElementById('hdr');
-    if (!hdr) {
-      hdr = document.createElement('div');
-      hdr.id = 'hdr';
-      hdr.className = 'hdr';
-      el('island').insertBefore(hdr, el('pinned-hint').nextSibling);
-    }
+  function renderHud(entries, primary) {
     const multi = entries.length > 1;
-    const step = primary && primary.turnStepText
-      ? '<span class="h-step mono">' + esc(primary.turnStepText) + '</span>' : '';
-    hdr.innerHTML = '<span class="dot" style="--dot:' + esc(primary.glow) + '"></span>'
-      + '<span class="badge">' + esc(primary.tag) + '</span>'
-      + '<span class="h-title">' + (multi
-        ? esc(entries.length) + ' 个会话'
-        : esc(primary.label)) + '</span>'
-      + step
-      + '<span class="hint' + (state.dshHint ? ' ok' : (state.pinned ? ' pin' : '')) + '">'
-      + esc(hintText()) + '</span>';
 
-    let detail = document.getElementById('detail');
-    let todo = document.getElementById('todo');
-    if (!multi) {
-      if (!detail) {
-        detail = document.createElement('div');
-        detail.id = 'detail';
-        detail.className = 'detail';
-        el('island').insertBefore(detail, el('list'));
-      }
-      detail.style.display = '';
-      detail.innerHTML = esc(primary.detailText || primary.label);
-      if (!todo) {
-        todo = document.createElement('div');
-        todo.id = 'todo';
-        todo.className = 'todo';
-        el('island').insertBefore(todo, el('list'));
-      }
-      if (primary.todoText) {
-        todo.style.display = '';
-        todo.innerHTML = (primary.todoCurrent
-            ? '<span class="cur">' + esc(primary.todoCurrent) + '</span>' : '<span class="cur"></span>')
-          + '<span class="prog mono">' + esc(primary.todoText) + '</span>';
-      } else {
-        todo.style.display = 'none';
-      }
-    } else {
-      if (detail) detail.style.display = 'none';
-      if (todo) todo.style.display = 'none';
+    setCssVar($('h-dot'), '--dot', (primary && primary.glow) || GLOW_IDLE);
+    setText($('h-badge'), primary ? (primary.badge || primary.tag || '') : 'READY');
+    setText($('h-title'), multi
+      ? entries.length + ' 个会话'
+      : (primary ? (primary.label || primary.shortId || '') : '没有活跃会话'));
+    const step = primary ? primary.turnStepText : '';
+    setText($('h-step'), step || '');
+    setHidden($('h-step'), !step);
+
+    // 上下文压力条：只在单会话、拿得到比例时出现。
+    // 它是「快满了」的早期预警：50% 转琥珀、80% 转红，和仪表同一条口径。
+    const pressure = $('pressure');
+    const frac = primary && typeof primary.contextFraction === 'number'
+      ? primary.contextFraction : null;
+    const pressureOn = !!primary && !multi && frac !== null && frac >= 0;
+    setHidden(pressure, !pressureOn);
+    if (pressureOn) {
+      const pct = Math.round(Math.min(1, Math.max(0, frac)) * 100);
+      setCssVar($('pressure-fill'), 'width', pct + '%');
+      const level = primary.contextLevel || (pct > 80 ? 2 : pct > 50 ? 1 : 0);
+      setAttr(pressure, 'data-level', level);
+      setAttr(pressure, 'aria-valuenow', pct);
     }
 
-    el('list').innerHTML = multi
-      ? entries.slice(0, 6).map((e, i) => rowHtml(e, i)).join('')
-      : '';
-  }
+    // 详情正文块：单会话才有（多会话的正文属于某一个会话，铺全局会误导）
+    const detail = $('detail');
+    const detailOn = !!primary && !multi;
+    setHidden(detail, !detailOn);
+    if (detailOn) setText($('detail-text'), primary.detailText || primary.label || '');
 
-  function clearExpandedExtras() {
-    for (const id of ['hdr', 'detail', 'todo']) {
-      const node = document.getElementById(id);
-      if (node) node.remove();
-    }
-  }
-
-  function hintText() {
-    if (state.dshHint) return state.dshHint;
-    if (state.pinned) return '已钉住 · 点状态行取消';
-    return '点对话跳转 · 点状态行钉住';
-  }
-
-  function rowHtml(e, i) {
-    const live = isLive(e.status);
-    return '<div class="row' + (live ? ' live' : '') + (i === 0 ? ' primary-row' : '') + '"'
-      + ' data-id="' + esc(e.id) + '" style="--dot:' + esc(e.glow) + '">'
-      + '<span class="dot"></span>'
-      + '<span class="label">' + esc(e.label) + '</span>'
-      + '<span class="action">' + esc(e.actionText || e.tag) + '</span>'
-      + '<span class="tag mono">' + esc(e.tag) + '</span>'
-      + '<span class="elapsed mono">' + (live && e.elapsedText ? esc(e.elapsedText) : '--:--') + '</span>'
-      + '</div>';
-  }
-
-  function statsHtml(e) {
-    const items = [];
-    if (e.elapsedText) items.push(stat('耗时', e.elapsedText));
-    if (e.turnStepText) items.push(stat('轮次', e.turnStepText));
-    if (e.toolCountText) items.push(stat('工具', e.toolCountText));
-    if (e.outputText) items.push(stat('输出', e.outputText));
-    if (e.contextText) {
-      const cls = e.contextLevel === 2 ? ' danger' : (e.contextLevel === 1 ? ' warn' : '');
-      items.push(stat('上下文', e.contextText, cls));
-    }
-    if (e.todoText) items.push(stat('待办', e.todoText));
-    if (e.subagentText) items.push(stat('子代理', e.subagentText));
-    return items.join('');
-  }
-
-  function stat(label, value, cls) {
-    return '<span class="stat' + (cls || '') + '">' + esc(label) + ': <b class="mono">' + esc(value) + '</b></span>';
-  }
-
-  function footerHtml(snap) {
-    const bridgeOk = snap.bridge && snap.bridge.ok;
-    const left = '<span class="foot-left"><i class="bridge-dot' + (bridgeOk ? ' on' : '') + '"></i>桥'
-      + (bridgeOk ? ' ' + esc(String(snap.bridge.port)) : '未连上')
-      // 有待处理但没被消费的跳转 → 直接说出来。
-      // 「点了会话、DSH 没切过去」在界面上和「一切正常」长得一样时，
-      // pending 是唯一的线索（health() 已透传）。
-      + (bridgeOk && snap.bridge.pending > 0
-        ? ' <span class="pending" title="有 ' + Number(snap.bridge.pending)
-          + ' 条跳转请求还没被 DSH 取走">待处理 ' + Number(snap.bridge.pending) + '</span>'
-        : '')
-      + '</span>';
-    // 「设置」必须出现在岛上。岛本身不做设置界面（入口在 DSH 的
-    // 设置 → 🏝️ 灵动岛，两边共用一份配置），但用户是先在屏幕上看到岛的，
-    // 不给一个指路的口，他只能自己猜设置在哪。
-    const settings = '<span class="link" data-act="settings">设置</span>';
-    const right = snap.jump && (Date.now() - snap.jump.at < 6000)
-      ? '<span class="jump' + (snap.jump.kind === 'failed' ? ' failed' : '') + '">'
-        + esc(snap.jump.brief) + '</span>' : '';
-    return left + right + settings;
-  }
-
-  /* ───────────── 点击：钉住 / 跳转 / 设置 ───────────── */
-
-  function bindClicks(entries, primary) {
-    // 折叠态的主行 = 「点一下钉住」（Mac：整块岛点一下 = 钉住/取消）
-    const p = el('primary');
-    p.onclick = () => { state.pinned = !state.pinned; render(state.snap); };
-
-    // 详情块（单会话）= 跳到该会话；统计行（多会话）= 跳主会话
-    const detail = document.getElementById('detail');
-    if (detail && primary) {
-      detail.onclick = () => jumpTo(entries[0]);
-    }
-    const stats = el('stats');
-    if (stats && primary) {
-      stats.onclick = () => jumpTo(entries[0]);
+    // 待办行
+    const todo = $('todo');
+    const todoOn = !!primary && !multi && !!primary.todoText;
+    setHidden(todo, !todoOn);
+    if (todoOn) {
+      setText($('todo-cur'), primary.todoCurrent || '');
+      setText($('todo-prog'), primary.todoText);
     }
 
-    for (const node of el('list').querySelectorAll('.row')) {
-      node.onclick = () => {
-        const id = node.getAttribute('data-id');
-        const entry = entries.find((x) => x.id === id);
-        if (entry) jumpTo(entry);
-      };
+    renderRows(multi ? entries : []);
+    renderStats(primary);
+    renderFooter();
+  }
+
+  /* ───────────── 会话行：按 id 增量复用 ───────────── */
+
+  function createRow(id) {
+    const node = document.createElement('div');
+    node.className = 'row';
+    node.setAttribute('data-id', id);
+    node.setAttribute('tabindex', '-1');
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    const label = document.createElement('span');
+    label.className = 'label';
+    const action = document.createElement('span');
+    action.className = 'action';
+    const tag = document.createElement('span');
+    tag.className = 'tag mono';
+    const elapsed = document.createElement('span');
+    elapsed.className = 'elapsed mono';
+    node.append(dot, label, action, tag, elapsed);
+    return { node, dot, label, action, tag, elapsed };
+  }
+
+  function updateRow(row, entry, index) {
+    setCssVar(row.dot, '--dot', entry.glow || GLOW_IDLE);
+    setClass(row.node, 'live', isLive(entry.status));
+    setClass(row.node, 'primary-row', index === 0);
+    setClass(row.node, 'focused', index === state.focusIndex);
+    setAttr(row.node, 'data-status', entry.status || 'idle');
+    setText(row.label, entry.label || entry.shortId || '');
+    setText(row.action, entry.actionText || entry.tag || '');
+    setText(row.tag, entry.tag || '');
+    setText(row.elapsed, isLive(entry.status) ? (elapsedTextOf(entry) || '--:--') : '--:--');
+    setAttr(row.node, 'aria-label', '跳转到 ' + (entry.label || entry.shortId || '会话'));
+  }
+
+  function renderRows(entries) {
+    const host = $('list');
+    const wanted = entries.slice(0, 6);
+    const keep = new Set(wanted.map((e) => e.id));
+
+    // 先删掉不再展示的（会话结束/被挤出前 6）
+    for (const [id, row] of state.rows) {
+      if (!keep.has(id)) { row.node.remove(); state.rows.delete(id); }
     }
-
-    const set = el('footer').querySelector('[data-act="settings"]');
-    if (set) {
-      set.onclick = (ev) => {
-        ev.stopPropagation();
-        window.island.openDsh().then((r) => {
-          // 做不到就说做不到。这里不写「已打开设置」这种一定为真的文案 ——
-          // 能不能把 DSH 带起来取决于它自己有没有实现单实例锁。
-          state.dshHint = (r && r.ok) ? '已切到 DSH' : 'DSH 设置 → 🏝️ 灵动岛';
-          render(state.snap);
-          clearTimeout(state.dshTimer);
-          state.dshTimer = setTimeout(() => { state.dshHint = null; render(state.snap); }, 6000);
-        }).catch(() => { /* 主进程已记日志 */ });
-      };
-    }
+    // 再按顺序复用/创建；节点已存在时 insertBefore 是移动，不是重建
+    wanted.forEach((entry, i) => {
+      let row = state.rows.get(entry.id);
+      if (!row) { row = createRow(entry.id); state.rows.set(entry.id, row); }
+      updateRow(row, entry, i);
+      const current = host.children[i];
+      if (current !== row.node) host.insertBefore(row.node, current || null);
+    });
   }
 
-  function jumpTo(entry) {
-    if (!entry) return;
-    window.island.jump({ id: entry.id, label: entry.label })
-      .then((r) => {
-        state.jump = r;
-        clearTimeout(state.jumpTimer);
-        state.jumpTimer = setTimeout(() => { state.jump = null; render(state.snap); }, 6000);
-        render(state.snap);
-      })
-      .catch(() => { /* 主进程已记日志 */ });
-  }
-
-  /* ───────────── 高度弹簧：窗口不动，岛自己改高 ───────────── */
-
-  /**
-   * .island 的高度过渡：换内容前后的两个显式高度交给 CSS 弹簧。
-   * 窗口是按最大展开态开好的，岛在窗口里长高/缩矮不会被裁（外发光
-   * 画在窗口的 bleed 里）。过渡结束后释放回 auto：显式高度会把
-   * 后续的内容变化（行数增减）裁掉。
-   */
-  function animateIslandHeight() {
-    const island = el('island');
-    if (!island) return;
-    const from = island.offsetHeight;
-    if (island.style.height) island.style.height = 'auto';
-    const natural = island.offsetHeight;
-    if (Math.abs(natural - from) < 1) { island.style.height = ''; return; }
-    island.style.height = Math.round(from) + 'px';
-    void island.offsetHeight;   // 强制回流：让「旧高」先落到布局上
-    island.style.height = Math.round(natural) + 'px';
-    clearTimeout(state.heightTimer);
-    state.heightTimer = setTimeout(() => { island.style.height = ''; }, HEIGHT_SETTLE_MS);
-  }
-
-  /* ───────────── 穿透切换 + 悬停驻留 ─────────────
+  /* ───────────── 统计行：固定槽位，只切显隐与值 ─────────────
    *
-   * 窗口平时穿透（forward:true 把 mousemove 转发进来），这里用转发位置
-   * 对岛的**当前**矩形做命中（岛会变大变小，热区必须跟着当前尺寸走 ——
-   * 拿窗口当热区会把岛外一圈透明区都算成「岛上」，Mac 的 islandRect
-   * 注释就是这件事）。状态翻转时才发 IPC，平时零开销。
+   * 槽位顺序照 Mac statsRow：耗时 / 工具 / 输出 / 上下文 / 在飞（子代理）。
+   * 「待办」不在这里 —— 单会话有独立的待办行（当前项 + 2/5），多会话的
+   * 待办属于某一个会话、铺到全局统计行只会重复；Swift 版同样只放在待办行。
    */
+
+  const STAT_DEFS = [
+    ['elapsed', '耗时'],
+    ['turn', '轮次'],
+    ['tools', '工具'],
+    ['output', '输出'],
+    ['context', '上下文'],
+    ['agents', '子代理'],
+  ];
+
+  function createStat(key, label) {
+    const node = document.createElement('span');
+    node.className = 'stat';
+    node.setAttribute('data-key', key);
+    node.append(document.createTextNode(label + ': '));
+    const value = document.createElement('b');
+    value.className = 'mono';
+    node.appendChild(value);
+    return { node, value };
+  }
+
+  function statValue(entry, key) {
+    if (!entry) return '';
+    switch (key) {
+      case 'elapsed': return elapsedTextOf(entry);
+      case 'turn': return entry.turnStepText || '';
+      case 'tools': return entry.toolCountText || '';
+      case 'output': return entry.outputText || '';
+      case 'context': return entry.contextText || '';
+      case 'agents': return entry.subagentText ? entry.subagentText + ' 个' : '';
+      default: return '';
+    }
+  }
+
+  function renderStats(primary) {
+    const host = $('stats');
+    let visible = 0;
+    for (const [key, label] of STAT_DEFS) {
+      let item = state.stats.get(key);
+      if (!item) {
+        item = createStat(key, label);
+        state.stats.set(key, item);
+        host.appendChild(item.node);
+      }
+      const value = statValue(primary, key);
+      setHidden(item.node, !value);
+      if (value) visible += 1;
+      setText(item.value, value);
+      if (key === 'context') {
+        setClass(item.node, 'warn', !!primary && primary.contextLevel === 1);
+        setClass(item.node, 'danger', !!primary && primary.contextLevel === 2);
+      }
+    }
+    setHidden(host, visible === 0);
+  }
+
+  /* ───────────── 末行：桥状态 / 跳转反馈 / 设置 ───────────── */
+
+  function renderFooter() {
+    const bridge = (state.snap && state.snap.bridge) || {};
+    const ok = !!bridge.ok;
+    setClass($('bridge-dot'), 'on', ok);
+    let text = ok ? ('桥 ' + (bridge.port || '')) : '桥未连上';
+    const pending = ok && typeof bridge.pending === 'number' ? bridge.pending : 0;
+    if (pending > 0) text += ' · 待处理 ' + pending;
+    setText($('bridge-text'), text);
+    setClass($('bridge-text'), 'pending', pending > 0);
+
+    const jump = $('jump');
+    const on = !!(state.jump && state.jump.brief);
+    setText(jump, on ? state.jump.brief : '');
+    setHidden(jump, !on);
+    setClass(jump, 'failed', !!(state.jump && state.jump.kind === 'failed'));
+  }
+
+  /* ───────────── 头部提示区：跳转反馈 > 钉住 > 默认提示 ───────────── */
+
+  function updateHint() {
+    const hint = $('h-hint');
+    let text = '点对话跳转 · 点状态行钉住';
+    let kind = '';
+    if (state.jump && state.jump.brief) {
+      text = state.jump.brief;
+      kind = state.jump.kind === 'failed' ? 'failed' : 'ok';
+    } else if (state.dshHint) {
+      text = state.dshHint;
+      kind = 'ok';
+    } else if (state.pinned) {
+      text = '已钉住 · 点状态行取消';
+      kind = 'pin';
+    }
+    setText(hint, text);
+    setClass(hint, 'ok', kind === 'ok');
+    setClass(hint, 'pin', kind === 'pin');
+    setClass(hint, 'failed', kind === 'failed');
+  }
+
+  /* ───────────────────────────── 本地秒级时钟 ─────────────────────────────
+   *
+   * 耗时数字必须自己走，否则主进程得每秒推一次快照（旧版就是这么干的，
+   * 而快照里还带着整个投影对象）。这里只改「时间文本」节点：文本节点改写
+   * 不触发重排，主线程成本可以忽略。
+   */
+
+  function scheduleClock() {
+    clearTimeout(state.clockTimer);
+    state.clockTimer = 0;
+    const anyLive = state.entries.some((e) => isLive(e.status)
+      && (typeof e.elapsedFrom === 'number' || typeof e.elapsedText === 'string'));
+    if (!anyLive) return;
+    const delay = CLOCK_TICK_MS - (Date.now() % CLOCK_TICK_MS) + 16;
+    state.clockTimer = setTimeout(tickClock, delay);
+  }
+
+  function tickClock() {
+    state.clockTimer = 0;
+    const primary = state.primary;
+    if (state.mode === 'compact') {
+      if (primary && isLive(primary.status)) setText($('c-elapsed'), elapsedTextOf(primary));
+    } else {
+      const elapsedItem = state.stats.get('elapsed');
+      if (elapsedItem && primary) setText(elapsedItem.value, elapsedTextOf(primary));
+      for (const [id, row] of state.rows) {
+        const entry = state.entries.find((x) => x.id === id);
+        if (entry && isLive(entry.status)) setText(row.elapsed, elapsedTextOf(entry) || '--:--');
+      }
+    }
+    scheduleClock();
+  }
+
+  /* ───────────────────────────── 高度：ResizeObserver → CSS 变量 ─────────────────────────────
+   *
+   * 旧版在每次渲染里 `offsetHeight` → 写 height → 再 `offsetHeight`，3 次
+   * 强制同步布局/秒。v2 反过来：让浏览器先把内容布局好（RO 回调），把自然
+   * 高度写进 `--island-h`，高度过渡交给 CSS。展开/收起、内容增减、宽度变化
+   * 引起换行，全部自动跟上，热路径里一次布局都不强制。
+   */
+
+  function observeSize() {
+    const body = $('island-body') || document.querySelector('.island-body');
+    const island = $('island');
+    if (!body || !island) return;
+    if (typeof ResizeObserver !== 'function') return;   // 理论到不了，兜底不崩
+
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        // contentRect 是已完成的布局结果，读它不触发回流
+        const h = Math.max(1, Math.round(entry.contentRect.height));
+        setCssVar(island, '--island-h', h + 'px');
+        state.rectDirty = true;
+        queuePointerRecheck();
+      }
+    });
+    ro.observe(body);
+  }
+
+  /* ───────────────────────────── 指针命中与穿透 ───────────────────────────── */
+
+  function islandRect() {
+    if (state.rect && !state.rectDirty) return state.rect;
+    state.rect = $('island').getBoundingClientRect();
+    state.rectDirty = false;
+    return state.rect;
+  }
 
   function hitIsland(x, y) {
-    const r = el('island').getBoundingClientRect();
-    const m = state.expandedNow ? 2 : HOT_MARGIN_PX;
+    const r = islandRect();
+    const m = state.expanded ? HOT_MARGIN_EXPANDED : HOT_MARGIN_PX;
     return x >= r.left - m && x <= r.right + m && y >= r.top - m && y <= r.bottom + m;
+  }
+
+  /** 合并到下一帧：pointermove 可能一秒几百次，命中判定只值每帧一次。 */
+  function queuePointerRecheck() {
+    if (state.pointerQueued) return;
+    state.pointerQueued = true;
+    requestAnimationFrame(() => {
+      state.pointerQueued = false;
+      evaluatePointer();
+    });
+  }
+
+  function setInteractive(on) {
+    if (state.interactive === on) return;
+    state.interactive = on;
+    window.island.setInteractive(on).catch(() => { /* 主进程已记日志 */ });
   }
 
   function evaluatePointer() {
@@ -411,27 +665,287 @@
     const over = hitIsland(state.pointer.x, state.pointer.y);
     if (over === state.overIsland) return;
     state.overIsland = over;
-    if (state.interactiveReq !== over) {
-      state.interactiveReq = over;
-      window.island.setInteractive(over).catch(() => { /* 主进程已记日志 */ });
-    }
+
     clearTimeout(state.hoverOpenTimer);
     clearTimeout(state.hoverCloseTimer);
     if (over) {
+      // 进岛：先接管鼠标（行/按钮立即可点），展开等驻留时间走完
+      setInteractive(true);
       state.hoverOpenTimer = setTimeout(() => {
-        if (state.overIsland && state.snap) render(state.snap);
+        if (state.overIsland) render();
       }, HOVER_OPEN_MS);
     } else {
+      // 出岛：宽限一会儿再收起（防手抖），但立刻交还穿透 ——
+      // 否则岛外的透明区域会继续吞下方应用的点击
+      setInteractive(false);
       state.hoverCloseTimer = setTimeout(() => {
-        if (!state.overIsland && state.snap) render(state.snap);
+        if (!state.overIsland) render();
       }, HOVER_CLOSE_MS);
     }
   }
 
-  document.addEventListener('mousemove', (e) => {
-    state.pointer = { x: e.clientX, y: e.clientY };
-    evaluatePointer();
-  });
+  function onPointerMove(ev) {
+    // 主进程已经在推真实光标 → 忽略 DOM 上的指针事件。
+    // 原因见 state.cursorFromMain：带 `-webkit-app-region: drag` 的窗口上，
+    // Electron 的 forward 转发会漏/错位，两路混用会让命中判定在水面上下跳。
+    if (state.cursorFromMain) return;
+    state.pointer = { x: ev.clientX, y: ev.clientY };
+    queuePointerRecheck();
+  }
 
-  window.island.onSnapshot(render);
+  /**
+   * 主进程推来的真实光标位置（约 30Hz）。
+   *
+   * 这是**悬停的主驱动**：窗口带拖拽区时 Electron 的 forwarded mousemove 会断，
+   * 靠它才能在整个岛体上稳定触发悬停。`inside:false` = 指针已出窗口。
+   */
+  function onCursor(pos) {
+    state.cursorFromMain = true;
+    if (!pos || pos.inside === false) {
+      onPointerLeave();
+      return;
+    }
+    state.pointer = { x: pos.x, y: pos.y };
+    queuePointerRecheck();
+  }
+
+  /** 指针离开窗口 / 主进程看门狗强制收回：复位悬停态，别留下「假常驻」。 */
+  function onPointerLeave() {
+    state.pointer = null;
+    clearTimeout(state.hoverOpenTimer);
+    clearTimeout(state.hoverCloseTimer);
+    const changed = state.overIsland;
+    state.overIsland = false;
+    // ⚠️ 必须真的通知主进程收回穿透，不能只改本地 state。
+    // 反例：指针从岛上直接滑出窗口（document mouseleave）→ 本地以为已经
+    // 出岛，但主进程还停在「接管」态；此时指针在窗口 bleed 的透明区里移动，
+    // evaluatePointer 会因为 over === state.overIsland 提前 return，永远补不上
+    // 那条 false —— 于是 484×300 窗口里的透明区继续吞桌面点击。看门狗只在
+    // 「真实光标已出窗口矩形」时兜底，救不了「已回到窗口内透明区」这一段。
+    setInteractive(false);
+    if (changed) render();
+  }
+
+  /* ───────────────────────────── 交互 ───────────────────────────── */
+
+  function togglePin() {
+    state.pinned = !state.pinned;
+    render();
+  }
+
+  function jumpTo(entry) {
+    if (!entry) return;
+    window.island.jump({ id: entry.id, label: entry.label })
+      .then((r) => {
+        state.jump = { kind: r && r.kind, brief: r && r.brief };
+        clearTimeout(state.jumpTimer);
+        state.jumpTimer = setTimeout(() => { state.jump = null; render(); }, RESULT_HOLD_MS);
+        render();
+      })
+      .catch(() => { /* 主进程已记日志 */ });
+  }
+
+  function openDsh() {
+    window.island.openDsh().then((r) => {
+      // 做不到就说做不到：能不能把 DSH 带起来取决于它自己有没有单实例锁
+      state.dshHint = (r && r.ok) ? '已切到 DSH' : 'DSH 设置 → 🏝️ 灵动岛';
+      render();
+      clearTimeout(state.dshTimer);
+      state.dshTimer = setTimeout(() => { state.dshHint = null; render(); }, RESULT_HOLD_MS);
+    }).catch(() => { /* 主进程已记日志 */ });
+  }
+
+  function openContextMenu() {
+    if (!window.island.contextMenu) return;
+    window.island.contextMenu({ pinned: state.pinned }).catch(() => { /* 主进程已记日志 */ });
+  }
+
+  function jumpPrimary() {
+    if (state.primary) jumpTo(state.primary);
+  }
+
+  function moveFocus(dir) {
+    const rows = state.entries.slice(0, 6);
+    if (!rows.length) return;
+    if (state.focusIndex < 0) state.focusIndex = dir > 0 ? 0 : rows.length - 1;
+    else state.focusIndex = Math.max(0, Math.min(rows.length - 1, state.focusIndex + dir));
+    refreshRowFocus();
+  }
+
+  function refreshRowFocus() {
+    const order = state.entries.slice(0, 6).map((e) => e.id);
+    for (const [id, row] of state.rows) {
+      setClass(row.node, 'focused', order[state.focusIndex] === id);
+    }
+  }
+
+  /* ───────────────────────────── 自定义拖窗 ─────────────────────────────
+   *
+   * 为什么不用 `-webkit-app-region: drag`：真机实测（2026-10-19）发现，窗口一旦
+   * 声明拖拽区，Windows 会把岛体里的点击当成**非客户区拖拽**处理 —— 点一下
+   * 窗口真的被拖走几个像素，页面收不到 click（钉住/跳转全失效）；同时
+   * `forward:true` 的 mousemove 转发也会被掐断（表现为「只有很窄的位置能触发
+   * 悬停」）。拖窗能力不能丢，所以改成自己实现：渲染层报指针屏幕坐标，
+   * 主进程按位移搬窗口。阈值 4px 用于区分「点击」与「拖窗」。
+   */
+
+  const DRAG_THRESHOLD_PX = 4;
+
+  /** 这些区域有自己的点击语义，按下不应启动拖窗。 */
+  function isClickControl(target) {
+    return !!(target && target.closest && target.closest('[data-act], .row, #detail, #stats'));
+  }
+
+  function onDragDown(ev) {
+    if (ev.button !== 0 || !state.interactive) return;
+    if (isClickControl(ev.target)) return;
+    state.drag = { id: ev.pointerId, x0: ev.screenX, y0: ev.screenY, moved: false };
+    // ⚠️ 不在这里 setPointerCapture：一旦给岛体加了指针捕获，click 事件会被
+    // 重定向到捕获元素，页面上的按钮/行就再也收不到 click（真机踩过）。
+    // 只有确认「真的在拖」之后才捕获，那时本来就要吞掉 click。
+  }
+
+  function onDragMove(ev) {
+    const d = state.drag;
+    if (!d || ev.pointerId !== d.id) return;
+    const dx = ev.screenX - d.x0;
+    const dy = ev.screenY - d.y0;
+    if (!d.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+    if (!d.moved) {
+      d.moved = true;
+      try { ev.currentTarget.setPointerCapture(ev.pointerId); } catch { /* 忽略 */ }
+      window.island.dragStart().catch(() => { /* 主进程已记日志 */ });
+    }
+    window.island.dragMove({ x: ev.screenX, y: ev.screenY }).catch(() => { /* 同上 */ });
+  }
+
+  function onDragEnd(ev) {
+    const d = state.drag;
+    if (!d) return;
+    state.drag = null;
+    if (d.moved) {
+      state.suppressClickUntil = Date.now() + 400;
+      window.island.dragEnd().catch(() => { /* 同上 */ });
+      try { ev.currentTarget.releasePointerCapture(d.id); } catch { /* 忽略 */ }
+    }
+  }
+
+  function bindInteractions() {
+    const island = $('island');
+
+    // 折叠态：点一下 = 钉住/取消（整条信息带是可点区）
+    $('compact').addEventListener('click', () => togglePin());
+    // 钉住提示本身也属于「状态行」：点它就该取消钉住（文案写的就是这个意思）
+    $('pinned-hint').addEventListener('click', () => { if (state.pinned) togglePin(); });
+    // 双击 = 把 DSH 叫到前面（省得去托盘里找）
+    $('compact').addEventListener('dblclick', (ev) => { ev.preventDefault(); openDsh(); });
+
+    // 展开态：按区域分派。可点区（详情/统计/行/设置）自己处理，
+    // 其余空白 = 钉住/取消 —— 与 Swift 版的「点非对话区 = 钉住」同一分工。
+    $('hud').addEventListener('click', (ev) => {
+      const target = ev.target;
+      if (target.closest('#list .row')) return;            // 行自己处理
+      if (target.closest('#detail')) { jumpPrimary(); return; }
+      if (target.closest('#stats')) { jumpPrimary(); return; }
+      if (target.closest('[data-act="settings"]')) { openDsh(); return; }
+      togglePin();
+    });
+
+    // 行点击（事件委托，行节点复用不重新绑定）
+    $('list').addEventListener('click', (ev) => {
+      const row = ev.target.closest('.row');
+      if (!row) return;
+      const id = row.getAttribute('data-id');
+      const entry = state.entries.find((x) => x.id === id);
+      if (entry) jumpTo(entry);
+    });
+
+    // 右键：原生菜单（钉住/隐藏/设置/配置目录/退出）
+    island.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      openContextMenu();
+    });
+
+    // 键盘：Esc 取消钉住；展开态 ↑/↓ 选行、Enter 跳转
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') {
+        state.focusIndex = -1;
+        refreshRowFocus();
+        if (state.pinned) { state.pinned = false; render(); }
+        return;
+      }
+      if (state.mode !== 'hud') return;
+      if (ev.key === 'ArrowDown') { moveFocus(1); ev.preventDefault(); }
+      else if (ev.key === 'ArrowUp') { moveFocus(-1); ev.preventDefault(); }
+      else if (ev.key === 'Enter' && state.focusIndex >= 0) {
+        const entry = state.entries[state.focusIndex];
+        if (entry) jumpTo(entry);
+        ev.preventDefault();
+      }
+    });
+
+    // 自定义拖窗（替代 app-region: drag）：移动超过阈值才开始拖，拖完抑制 click。
+    island.addEventListener('pointerdown', onDragDown);
+    island.addEventListener('pointermove', onDragMove);
+    island.addEventListener('pointerup', onDragEnd);
+    island.addEventListener('pointercancel', onDragEnd);
+    // 拖窗结束后的 click 在捕获阶段吞掉，避免「拖一下」顺带钉住/跳转。
+    island.addEventListener('click', (ev) => {
+      if (Date.now() < state.suppressClickUntil) {
+        ev.stopPropagation();
+        ev.preventDefault();
+      }
+    }, true);
+
+    // 指针：只记位置 + 脏标记，判定合并到下一帧。
+    // 两路都收的原因不是「保险」：
+    //   - 真实鼠标移动两路都会来（pointermove 由 mousemove 合成），rAF 合并后只判一次；
+    //   - 窗口 forward:true 转发进来的是 mousemove；
+    //   - `DSH_NOTCH_SMOKE` 与 `scripts/shots.js` 用合成的 MouseEvent('mousemove')
+    //     驱动悬停（合成事件不会派生 pointermove）—— 只监听 pointermove 的话
+    //     「冒烟能展开」这条验证会静默失效，退回 v1 那种「截不到展开态」。
+    document.addEventListener('pointermove', onPointerMove, { passive: true });
+    document.addEventListener('mousemove', onPointerMove, { passive: true });
+
+    document.addEventListener('mouseleave', onPointerLeave);
+    window.addEventListener('resize', () => { state.rectDirty = true; queuePointerRecheck(); });
+
+    // 尺寸过渡结束：矩形变了，重新判定（指针没动时也要跟上）
+    island.addEventListener('transitionend', (ev) => {
+      if (ev.target !== island) return;
+      if (ev.propertyName !== 'width' && ev.propertyName !== 'height') return;
+      state.rectDirty = true;
+      queuePointerRecheck();
+    });
+
+    // 兜底：转发的 mousemove 在极端场景会丢（快速出窗、系统手势）。
+    // 每秒用最近一次指针位置重算一次，配合主进程 500ms 看门狗双保险。
+    setInterval(() => {
+      state.rectDirty = true;
+      evaluatePointer();
+    }, SAFETY_RECHECK_MS);
+
+    // 主进程看门狗收回穿透后通知我们复位
+    if (typeof window.island.onPointerLeave === 'function') {
+      window.island.onPointerLeave(onPointerLeave);
+    }
+    // 悬停主驱动：真实光标位置（约 30Hz，位置不变不发）。
+    // 没有主进程的合成场景（shots.js / perf.js）不暴露它，自动退回 DOM 事件路径。
+    if (typeof window.island.onCursor === 'function') {
+      window.island.onCursor(onCursor);
+    }
+    // 右键菜单里的「钉住/取消钉住」：原生菜单在主进程弹，但 pinned 的唯一
+    // 真相源在渲染层（它还要同时管展开/收起、Esc、点主行）。菜单只发一条
+    // 「切换」回来，走同一条 togglePin，避免两处各存一份状态在某个分支打架。
+    if (typeof window.island.onPinToggle === 'function') {
+      window.island.onPinToggle(togglePin);
+    }
+  }
+
+  /* ───────────────────────────── 启动 ───────────────────────────── */
+
+  bindInteractions();
+  observeSize();
+  render();                              // 首帧先给「没有活跃会话」，避免白屏
+  window.island.onSnapshot(onSnapshot);
 })();
