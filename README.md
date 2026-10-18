@@ -8,7 +8,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-blue.svg)](#-平台支持)
-[![Version](https://img.shields.io/badge/Version-1.3.1-blue.svg)](https://github.com/myYangyunfan/dsh-deepisland/releases)
+[![Version](https://img.shields.io/badge/Version-1.4.0-blue.svg)](https://github.com/myYangyunfan/dsh-deepisland/releases)
 [![Tests](https://img.shields.io/badge/Tests-336%20%2B%20507%20passing-brightgreen.svg)](#-开发与测试)
 
 <br>
